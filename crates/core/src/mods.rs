@@ -284,10 +284,13 @@ pub async fn install(
             .error_for_status()?
             .json()
             .await?;
-        // Newest stable release, or the newest of any kind if there is no release.
+        // Newest release or beta (alphas only if nothing else). Not "newest release": an
+        // older release can be incompatible with the newest versions of the mods it works
+        // with (Iris 1.8.8 needs Sodium 0.6, while Sodium's newest is 0.8 and its matching
+        // Iris is a beta), and Fabric then refuses to start.
         let pick = versions
             .iter()
-            .position(|v| v.version_type == "release")
+            .position(|v| v.version_type != "alpha")
             .unwrap_or(0);
         let Some(version) = versions.into_iter().nth(pick) else {
             let msg = format!(
@@ -295,7 +298,7 @@ pub async fn install(
                 info.title
             );
             if top_level {
-                return Err(other(msg));
+                return Err(crate::error::Error::NotAvailable(msg));
             }
             eprintln!("warning: {msg}");
             continue;
@@ -359,6 +362,45 @@ pub async fn install(
         }
     }
     Ok(installed)
+}
+
+/// Open-source Fabric mods that together cover what people install OptiFine for, with no
+/// manual download. (OptiFine itself may not be fetched automatically; see loader::optifine.)
+pub const OPTIFINE_ALTERNATIVE: &[(&str, &str)] = &[
+    ("sodium", "faster rendering"),
+    ("iris", "shader packs (OptiFine-compatible)"),
+    ("sodium-extra", "OptiFine-style detail options"),
+    ("reeses-sodium-options", "a better video settings screen"),
+    ("lithium", "faster game logic"),
+    ("entityculling", "skips hidden entities"),
+    ("immediatelyfast", "faster HUD and text"),
+    ("ferrite-core", "less memory use"),
+    ("continuity", "connected textures"),
+    ("entitytexturefeatures", "random/emissive entity textures"),
+    ("entity-model-features", "custom entity models"),
+    ("lambdynamiclights", "dynamic lights"),
+    ("zoomify", "zoom key"),
+    ("modmenu", "mod settings menu"),
+];
+
+/// Install a list of Modrinth projects. Ones without a release for this Minecraft version
+/// are skipped. Returns (installed titles, skipped slugs).
+pub async fn install_preset(
+    http: &reqwest::Client,
+    paths: &Paths,
+    instance: &Instance,
+    slugs: &[&str],
+    progress: &ProgressFn,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let (mut installed, mut skipped) = (Vec::new(), Vec::new());
+    for slug in slugs {
+        match install(http, paths, instance, slug, progress).await {
+            Ok(titles) => installed.extend(titles),
+            Err(crate::error::Error::NotAvailable(_)) => skipped.push(slug.to_string()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((installed, skipped))
 }
 
 /// Look up unidentified jars (added by hand or by a modpack) on Modrinth by their SHA-1,

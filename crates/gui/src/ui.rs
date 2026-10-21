@@ -14,8 +14,8 @@ use nethernode_core::loader::LoaderKind;
 use crate::background::Portal;
 use crate::theme;
 use crate::{
-    App, EditForm, Load, LoaderPick, Message, ModsTab, ModsView, NewInstanceForm, PacksView,
-    Screen, VersionFilter,
+    App, EditForm, FolderKind, Load, LoaderPick, Message, ModsTab, ModsView, NewInstanceForm,
+    PacksView, Screen, SettingsForm, VersionFilter,
 };
 
 /// Obsidian block size in the background, logical px. Content sits inside this frame.
@@ -23,10 +23,13 @@ const BLOCK: f32 = 40.0;
 /// Lines actually laid out in the console; laying out thousands of lines every frame is slow.
 const LOG_VISIBLE: usize = 400;
 
+/// Bundled fonts (see `fonts` in main.rs), so text never depends on what the OS has.
+pub const UI_FONT: Font = Font::with_name("Inter");
 const BOLD: Font = Font {
     weight: iced::font::Weight::Bold,
-    ..Font::DEFAULT
+    ..UI_FONT
 };
+const MONO: Font = Font::with_name("JetBrains Mono");
 
 fn loader_color(kind: Option<LoaderKind>) -> Color {
     match kind {
@@ -86,6 +89,7 @@ impl App {
             Screen::Accounts { name } => self.dialog(self.accounts_form(name)),
             Screen::Mods(view) => self.mods_screen(view),
             Screen::Modpacks(view) => self.modpacks_screen(view),
+            Screen::Settings(form) => self.dialog(self.settings_form(form)),
         };
         let mut content = column![self.top_bar()].spacing(14);
         if let Some((is_error, msg)) = &self.notice {
@@ -93,7 +97,7 @@ impl App {
                 container(
                     row![
                         text(msg).width(Length::Fill),
-                        button(text("✕").size(12))
+                        button(text("×").size(16))
                             .style(theme::link)
                             .on_press(Message::DismissNotice),
                     ]
@@ -115,7 +119,13 @@ impl App {
                 .padding(BLOCK + 12.0)
                 .width(Length::Fill)
                 .height(Length::Fill);
+            // The gradient underneath shows if the GPU path ever falls back to the CPU.
+            let backdrop = container(space())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::static_backdrop);
             stack![
+                backdrop,
                 shader(portal).width(Length::Fill).height(Length::Fill),
                 inside
             ]
@@ -135,20 +145,10 @@ impl App {
         let mut right = row![chip(format!("{gb:.0} GB RAM"), theme::VIOLET_BRIGHT)]
             .spacing(8)
             .align_y(Alignment::Center);
-        if self.gpu {
-            let label = if self.prefs.animated_background {
-                "Animation on"
-            } else {
-                "Animation off"
-            };
-            right = right.push(small_button(label).on_press(Message::ToggleAnimation));
-        }
         right = right
             .push(small_button("Modpacks").on_press(Message::ShowModpacks))
             .push(small_button("Accounts").on_press(Message::ShowAccounts))
-            .push(
-                small_button("Data folder").on_press(Message::OpenFolder(self.paths.root.clone())),
-            );
+            .push(small_button("Settings").on_press(Message::ShowSettings));
         container(
             row![
                 image(self.logo.clone())
@@ -449,7 +449,7 @@ impl App {
                     lines
                         .iter()
                         .skip(lines.len() - shown)
-                        .map(|line| text(line).size(12).font(Font::MONOSPACE).into()),
+                        .map(|line| text(line).size(12).font(MONO).into()),
                 )
                 .spacing(2);
                 container(
@@ -499,22 +499,22 @@ impl App {
         .spacing(4);
 
         let selected = self.selected.as_ref().and_then(|s| self.instance(s));
-        let target: Element<'_, Message> = match selected {
-            Some(i) => column![
-                text("INSTANCE").size(11).color(theme::MUTED),
-                text(&i.name).size(17).font(BOLD),
-                text(format!(
-                    "Minecraft {} · {}",
-                    i.minecraft_version(),
-                    loader_label(i)
-                ))
-                .size(12)
-                .color(theme::MUTED),
-            ]
-            .spacing(2)
-            .into(),
-            None => text("No instance selected").color(theme::MUTED).into(),
+        let names: Vec<String> = self.instances.iter().map(|i| i.name.clone()).collect();
+        let picker = pick_list(names, self.selected.clone(), Message::Select)
+            .placeholder("Choose an instance")
+            .style(theme::picker)
+            .width(220);
+        let detail = match selected {
+            Some(i) => format!("Minecraft {} · {}", i.minecraft_version(), loader_label(i)),
+            None => "Create an instance to play".into(),
         };
+        let target: Element<'_, Message> = column![
+            text("INSTANCE").size(11).color(theme::MUTED),
+            picker,
+            text(detail).size(12).color(theme::MUTED),
+        ]
+        .spacing(4)
+        .into();
 
         let big = |label: &str| {
             text(label.to_string())
@@ -574,15 +574,22 @@ impl App {
         pick: &'a LoaderPick,
         minecraft: Option<&'a str>,
     ) -> Element<'a, Message> {
+        let mc = minecraft.unwrap_or("this version");
+        // Loaders with no release for this Minecraft version are greyed out.
+        let unavailable: Vec<LoaderKind> = LoaderKind::ALL
+            .into_iter()
+            .filter(|k| minecraft.is_some_and(|mc| self.loader_unavailable(mc, *k)))
+            .collect();
         let options = [None]
             .into_iter()
             .chain(LoaderKind::ALL.into_iter().map(Some))
             .map(|kind| {
                 let label = kind.map_or("Vanilla", |k| k.name());
+                let disabled = kind.is_some_and(|k| unavailable.contains(&k)) && pick.kind != kind;
                 button(text(label).size(14))
                     .padding([8, 14])
                     .style(theme::segment(pick.kind == kind))
-                    .on_press(Message::PickLoader(kind))
+                    .on_press_maybe((!disabled).then_some(Message::PickLoader(kind)))
                     .into()
             });
         let segments = row(options).spacing(6).wrap().vertical_spacing(6);
@@ -599,54 +606,86 @@ impl App {
             Some(LoaderKind::NeoForge) => {
                 "The modern Forge fork, used by most new Forge-style mods from 1.20.2 on."
             }
-            Some(LoaderKind::OptiFine) => {
-                "Graphics and performance tweaks with shader support (no other mods)."
-            }
+            Some(LoaderKind::OptiFine) => "Better graphics, performance and shaders.",
         };
-        let mut section = column![
-            text("Mod loader").size(13).color(theme::MUTED),
-            segments,
-            text(about).size(12).color(theme::MUTED)
-        ]
-        .spacing(8);
+        let mut section =
+            column![text("Mod loader").size(13).color(theme::MUTED), segments].spacing(8);
+        if !unavailable.is_empty() {
+            let names: Vec<&str> = unavailable.iter().map(|k| k.name()).collect();
+            section = section.push(
+                text(format!(
+                    "Not released yet for Minecraft {mc}: {}",
+                    names.join(", ")
+                ))
+                .size(12)
+                .color(theme::WARNING),
+            );
+        }
+        section = section.push(text(about).size(12).color(theme::MUTED));
 
         match pick.kind {
             None => {}
             Some(LoaderKind::OptiFine) => {
-                let mc = minecraft.unwrap_or("this version");
-                let chosen = pick
-                    .optifine_jar
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned());
-                section = section.push(
-                    container(
-                        column![
-                            text("OptiFine's author doesn't allow automatic downloads, so it takes two steps:").size(13),
-                            row![
-                                text(format!("1. Download OptiFine for Minecraft {mc}")).size(13).width(Length::Fill),
-                                small_button("Open optifine.net")
-                                    .on_press(Message::OpenUrl("https://optifine.net/downloads".into())),
-                            ]
-                            .align_y(Alignment::Center),
-                            row![
-                                text(match &chosen {
-                                    Some(name) => format!("2. Chosen: {name}"),
-                                    None => "2. Choose the downloaded .jar".into(),
-                                })
-                                .size(13)
-                                .width(Length::Fill),
-                                small_button("Browse…").on_press(Message::BrowseOptiFine),
-                            ]
-                            .align_y(Alignment::Center),
-                            text("Prefer one click? Fabric + Sodium + Iris gives similar speed and shaders.")
+                let choice = row![
+                    button(text("One-click alternative (recommended)").size(13))
+                        .padding([6, 12])
+                        .style(theme::segment(pick.optifine_alt))
+                        .on_press(Message::OptiFineAlternative(true)),
+                    button(text("Use a real OptiFine jar").size(13))
+                        .padding([6, 12])
+                        .style(theme::segment(!pick.optifine_alt))
+                        .on_press(Message::OptiFineAlternative(false)),
+                ]
+                .spacing(6);
+                let detail: Element<'a, Message> = if pick.optifine_alt {
+                    let features = nethernode_core::mods::OPTIFINE_ALTERNATIVE
+                        .iter()
+                        .map(|(_, what)| chip(*what, theme::VIOLET_BRIGHT));
+                    let mut col = column![
+                        text("Installs Fabric plus open-source mods that do what OptiFine does. Nothing to download yourself:")
+                            .size(13),
+                        row(features).spacing(6).wrap().vertical_spacing(6),
+                    ]
+                    .spacing(10);
+                    if minecraft.is_some_and(|mc| self.loader_unavailable(mc, LoaderKind::Fabric)) {
+                        col = col.push(
+                            text(format!("Fabric isn't released for Minecraft {mc} yet, so this can't be installed."))
                                 .size(12)
-                                .color(theme::MUTED),
+                                .color(theme::WARNING),
+                        );
+                    }
+                    col.into()
+                } else {
+                    let chosen = pick
+                        .optifine_jar
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned());
+                    column![
+                        text("OptiFine's author doesn't allow other apps to download it, so it takes two steps:").size(13),
+                        row![
+                            text(format!("1. Download OptiFine for Minecraft {mc}")).size(13).width(Length::Fill),
+                            small_button("Open optifine.net").on_press(Message::OpenUrl("https://optifine.net/downloads".into())),
                         ]
-                        .spacing(10),
-                    )
-                    .padding(14)
-                    .style(theme::row_item),
+                        .align_y(Alignment::Center),
+                        row![
+                            text(match &chosen {
+                                Some(name) => format!("2. Chosen: {name}"),
+                                None => "2. Choose the downloaded .jar".into(),
+                            })
+                            .size(13)
+                            .width(Length::Fill),
+                            small_button("Browse…").on_press(Message::BrowseOptiFine),
+                        ]
+                        .align_y(Alignment::Center),
+                    ]
+                    .spacing(10)
+                    .into()
+                };
+                section = section.push(
+                    container(column![choice, detail].spacing(12))
+                        .padding(14)
+                        .style(theme::row_item),
                 );
             }
             Some(kind) => {
@@ -784,11 +823,150 @@ impl App {
             ),
             field("Minecraft version", versions),
             self.loader_picker(&form.loader, form.version.as_deref()),
+            new_worlds_section(form),
             checkbox(form.low_end)
-                .label("Low-end graphics defaults (render distance 6, 60 FPS cap, fast graphics)")
+                .label("Low-end defaults (render distance 8, 60 FPS cap)")
                 .on_toggle(Message::NewLowEnd),
         ]
         .spacing(18)
+        .into()
+    }
+
+    fn edit_worlds_section<'a>(&'a self, form: &'a EditForm) -> Element<'a, Message> {
+        let Some(instance) = self.instance(&form.original) else {
+            return space().into();
+        };
+        let worlds = nethernode_core::worlds::list(&self.paths, instance);
+        let list: Element<'a, Message> = if worlds.is_empty() {
+            text("No worlds yet.").size(12).color(theme::MUTED).into()
+        } else {
+            row(worlds
+                .into_iter()
+                .map(|w| chip(w.name, theme::VIOLET_BRIGHT)))
+            .spacing(6)
+            .wrap()
+            .vertical_spacing(6)
+            .into()
+        };
+        column![
+            text("Worlds").size(13).color(theme::MUTED),
+            list,
+            row![
+                small_button("Import world folder…").on_press(Message::EditImportWorlds(false)),
+                small_button("Import world .zip…").on_press(Message::EditImportWorlds(true)),
+                small_button("Open saves folder").on_press(Message::OpenFolder(
+                    nethernode_core::worlds::saves_dir(&self.paths, instance)
+                )),
+            ]
+            .spacing(8)
+            .wrap()
+            .vertical_spacing(8),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn settings_form<'a>(&'a self, form: &'a SettingsForm) -> Element<'a, Message> {
+        use nethernode_core::settings::Renderer;
+        let folder = |label: &'a str,
+                      path: String,
+                      which: FolderKind,
+                      hint: &'a str|
+         -> Element<'a, Message> {
+            column![
+                text(label).size(13).color(theme::MUTED),
+                row![
+                    container(text(path).size(13).font(MONO))
+                        .padding([9, 12])
+                        .width(Length::Fill)
+                        .style(theme::row_item),
+                    small_button("Change…")
+                        .on_press_maybe((!form.busy).then_some(Message::SettingsPick(which))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+                text(hint).size(12).color(theme::MUTED),
+            ]
+            .spacing(6)
+            .into()
+        };
+        let instances_path = form
+            .instances_dir
+            .clone()
+            .unwrap_or_else(|| form.data_dir.join("instances"))
+            .display()
+            .to_string();
+        let mut instances = column![folder(
+            "Instances and worlds",
+            instances_path,
+            FolderKind::Instances,
+            "Each instance's worlds, mods and settings.",
+        )]
+        .spacing(6);
+        if form.instances_dir.is_some() {
+            instances = instances.push(
+                button(text("Keep them inside the game files folder").size(12))
+                    .style(theme::link)
+                    .on_press_maybe((!form.busy).then_some(Message::SettingsResetInstances)),
+            );
+        }
+        let renderers = [
+            (Renderer::Auto, "Automatic"),
+            (Renderer::Gpu, "GPU (animated portal)"),
+            (Renderer::Cpu, "CPU (lightest)"),
+        ]
+        .into_iter()
+        .map(|(r, label)| {
+            button(text(label).size(13))
+                .padding([6, 12])
+                .style(theme::segment(form.renderer == r))
+                .on_press(Message::SettingsRenderer(r))
+                .into()
+        });
+        let save_label = if form.busy { "Moving files…" } else { "Save" };
+        column![
+            row![
+                text("Settings").size(26).font(BOLD),
+                space::horizontal(),
+                small_button("Cancel").on_press_maybe((!form.busy).then_some(Message::ShowHome)),
+                button(text(save_label).size(15).font(BOLD))
+                    .padding([10, 26])
+                    .style(theme::play)
+                    .on_press_maybe((!form.busy).then_some(Message::SaveSettings)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+            folder(
+                "Game files (Minecraft downloads)",
+                form.data_dir.display().to_string(),
+                FolderKind::GameFiles,
+                "Versions, libraries, assets and Java runtimes, shared by all instances.",
+            ),
+            instances,
+            checkbox(form.move_files)
+                .label("Move my existing files to the new folders")
+                .on_toggle_maybe((!form.busy).then_some(Message::SettingsMoveFiles)),
+            column![
+                text("Launcher graphics").size(13).color(theme::MUTED),
+                row(renderers).spacing(6).wrap().vertical_spacing(6),
+                text(format!(
+                    "Automatic uses the GPU unless this computer has 4 GB of RAM or less (it has {} GB). Takes effect after a restart.",
+                    self.memory.total_mb / 1024
+                ))
+                .size(12)
+                .color(theme::MUTED),
+                checkbox(form.animated_background)
+                    .label("Animated nether portal background")
+                    .on_toggle(Message::SettingsAnimation),
+            ]
+            .spacing(8),
+            row![
+                small_button("Open game files folder").on_press(Message::OpenFolder(self.paths.root.clone())),
+                small_button("Open instances folder").on_press(Message::OpenFolder(self.paths.instances())),
+            ]
+            .spacing(8),
+        ]
+        .spacing(20)
         .into()
     }
 
@@ -879,6 +1057,7 @@ impl App {
             .align_y(Alignment::Center),
             self.loader_picker(&form.loader, minecraft),
             self.window_section(form),
+            self.edit_worlds_section(form),
             memory,
             field(
                 "Java executable (leave empty to pick automatically)",
@@ -908,10 +1087,7 @@ impl App {
                     row![
                         column![
                             text(&account.name).size(16).font(BOLD),
-                            text(&account.uuid)
-                                .size(11)
-                                .font(Font::MONOSPACE)
-                                .color(theme::MUTED),
+                            text(&account.uuid).size(11).font(MONO).color(theme::MUTED),
                         ]
                         .spacing(2)
                         .width(Length::Fill),
@@ -1335,12 +1511,7 @@ fn view_crash<'a>(name: &str, crash: &'a CrashInfo) -> Element<'a, Message> {
     let mut details =
         column![text(&crash.title).size(17).font(BOLD).color(theme::DANGER)].spacing(8);
     if let Some(cause) = &crash.cause {
-        details = details.push(
-            text(cause)
-                .size(12)
-                .font(Font::MONOSPACE)
-                .color(theme::MUTED),
-        );
+        details = details.push(text(cause).size(12).font(MONO).color(theme::MUTED));
     }
     if let Some(hint) = &crash.hint {
         details = details.push(text(hint).size(14));
@@ -1363,4 +1534,35 @@ fn view_crash<'a>(name: &str, crash: &'a CrashInfo) -> Element<'a, Message> {
         .width(Length::Fill)
         .style(theme::notice(true))
         .into()
+}
+
+/// Worlds picked in the New instance form, imported once it's created.
+fn new_worlds_section(form: &NewInstanceForm) -> Element<'_, Message> {
+    let picked = form.worlds.iter().enumerate().map(|(i, path)| {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        row![
+            text(name).size(13).width(Length::Fill),
+            button(text("×").size(15))
+                .style(theme::link)
+                .on_press(Message::RemoveNewWorld(i)),
+        ]
+        .align_y(Alignment::Center)
+        .into()
+    });
+    column![
+        text("Worlds to bring in (optional)")
+            .size(13)
+            .color(theme::MUTED),
+        column(picked).spacing(4),
+        row![
+            small_button("Add world folder…").on_press(Message::NewAddWorlds(false)),
+            small_button("Add world .zip…").on_press(Message::NewAddWorlds(true)),
+        ]
+        .spacing(8),
+    ]
+    .spacing(8)
+    .into()
 }

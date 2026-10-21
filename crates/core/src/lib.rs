@@ -17,6 +17,8 @@ pub mod modpack;
 pub mod mods;
 pub mod paths;
 pub mod rules;
+pub mod settings;
 pub mod version;
+pub mod worlds;
 
 pub use error::{Error, Result};

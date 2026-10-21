@@ -14,12 +14,34 @@ use std::path::{Path, PathBuf};
 /// ```
 #[derive(Debug, Clone)]
 pub struct Paths {
+    /// Game files: versions, libraries, assets, Java runtimes, caches.
     pub root: PathBuf,
+    /// Instances, including their worlds. Normally `<root>/instances`; can be moved.
+    instances_dir: PathBuf,
 }
 
 impl Paths {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        Self {
+            instances_dir: root.join("instances"),
+            root,
+        }
+    }
+
+    /// Keep instances (and their worlds) somewhere other than the game files.
+    pub fn with_instances_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.instances_dir = dir.into();
+        self
+    }
+
+    /// The folders chosen in [`crate::settings::Settings`] (or the defaults).
+    pub fn from_settings(settings: &crate::settings::Settings) -> Self {
+        let paths = Self::new(settings.data_dir.clone().unwrap_or_else(Self::default_root));
+        match &settings.instances_dir {
+            Some(dir) => paths.with_instances_dir(dir),
+            None => paths,
+        }
     }
 
     /// `$NETHERNODE_HOME`, else the platform data dir (e.g. `~/.local/share/nethernode`).
@@ -54,7 +76,7 @@ impl Paths {
         self.root.join("runtimes")
     }
     pub fn instances(&self) -> PathBuf {
-        self.root.join("instances")
+        self.instances_dir.clone()
     }
     pub fn accounts_file(&self) -> PathBuf {
         self.root.join("accounts.json")

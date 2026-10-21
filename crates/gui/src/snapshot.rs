@@ -5,7 +5,7 @@
 //! - `NETHERNODE_SNAPSHOT_INSTANCE=<name>` selects the instance first.
 //! - `NETHERNODE_SNAPSHOT_CLOSE=1` instead starts the game and closes the window mid-game.
 //!
-//! Screens: home, new, new-all, new-forge, new-optifine, edit, accounts, mods, browse,
+//! Screens: home, settings, new-snapshot, new, new-all, new-forge, new-optifine, edit, accounts, mods, browse,
 //! modpacks, playing (presses Play, waits 25 s), stopped (presses Stop), drop-pack (drops
 //! `$NETHERNODE_SNAPSHOT_PACK` on the window, captures after 5 s) and home-later (150 s wait).
 
@@ -76,6 +76,23 @@ pub fn update(app: &mut App, step: Step) -> Task<Message> {
                     send(app, Message::ShowNewInstance);
                     send(app, Message::PickLoader(Some(LoaderKind::Fabric)));
                     2500
+                }
+                "settings" => {
+                    send(app, Message::ShowSettings);
+                    800
+                }
+                "new-snapshot" => {
+                    // Newest snapshot: most loaders haven't released for it yet.
+                    let newest = app
+                        .version_choices(VersionFilter::Snapshots)
+                        .first()
+                        .map(|c| c.id.clone());
+                    send(app, Message::ShowNewInstance);
+                    send(app, Message::NewFilter(VersionFilter::Snapshots));
+                    if let Some(v) = newest {
+                        send(app, Message::NewVersion(v));
+                    }
+                    6000
                 }
                 "new-all" => {
                     send(app, Message::ShowNewInstance);

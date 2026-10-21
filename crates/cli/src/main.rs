@@ -164,6 +164,10 @@ enum ModsCmd {
         instance: String,
         file: PathBuf,
     },
+    /// Install the open-source OptiFine alternative (Sodium, Iris, Continuity, ...) on a Fabric/Quilt instance
+    OptifineAlternative {
+        instance: String,
+    },
     Enable {
         instance: String,
         file: String,
@@ -221,7 +225,11 @@ fn parse_loader(name: &str) -> Result<LoaderKind> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let paths = Paths::new(cli.data_dir.unwrap_or_else(Paths::default_root));
+    // --data-dir wins; otherwise the folders chosen in the app's Settings.
+    let paths = match cli.data_dir {
+        Some(dir) => Paths::new(dir),
+        None => nethernode_core::settings::Settings::load().paths(),
+    };
 
     match cli.command {
         Command::Versions {
@@ -319,9 +327,7 @@ async fn main() -> Result<()> {
                     instance.dir(&paths).display()
                 );
                 if low_end {
-                    println!(
-                        "applied low-end graphics defaults (render distance 6, 60 FPS cap, fast graphics)"
-                    );
+                    println!("applied low-end defaults (render distance 8, 60 FPS cap)");
                 }
             }
             InstanceCmd::List => {
@@ -447,6 +453,18 @@ async fn main() -> Result<()> {
                     }
                     for title in added {
                         println!("installed {title}");
+                    }
+                }
+                ModsCmd::OptifineAlternative { instance } => {
+                    let instance = Instance::load(&paths, &instance)?;
+                    let slugs: Vec<&str> =
+                        mods::OPTIFINE_ALTERNATIVE.iter().map(|(s, _)| *s).collect();
+                    let (installed, skipped) =
+                        mods::install_preset(&http, &paths, &instance, &slugs, &progress_bars())
+                            .await?;
+                    println!("installed {} mods", installed.len());
+                    if !skipped.is_empty() {
+                        println!("not available for this version: {}", skipped.join(", "));
                     }
                 }
                 ModsCmd::AddFile { instance, file } => {

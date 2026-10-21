@@ -25,6 +25,7 @@ use nethernode_core::memory::SystemMemory;
 use nethernode_core::modpack;
 use nethernode_core::mods::{self, InstalledMod, SearchHit};
 use nethernode_core::paths::Paths;
+use nethernode_core::settings::Settings;
 use nethernode_core::version::{self, ManifestEntry};
 
 use textures::GameTextures;
@@ -33,13 +34,23 @@ use textures::GameTextures;
 const LOG_LIMIT: usize = 2000;
 
 pub fn main() -> iced::Result {
-    // On low-memory machines draw with the CPU renderer: about 40 MB instead of about 90 MB
-    // for the GPU one, which leaves more for the game. `ICED_BACKEND` still overrides it.
-    if std::env::var_os("ICED_BACKEND").is_none() && SystemMemory::current().is_low() {
+    // GPU renderer unless Settings say otherwise or the machine has 4 GB of RAM or less
+    // (the CPU renderer uses ~40 MB instead of ~90 MB). `ICED_BACKEND` still overrides it.
+    let settings = Settings::load();
+    if std::env::var_os("ICED_BACKEND").is_none()
+        && !settings.use_gpu(SystemMemory::current().total_mb)
+    {
         // SAFETY: nothing else is running yet; this happens before any thread is spawned.
         unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
     }
+    theme::set_cpu_renderer(cpu_renderer());
     iced::application(App::new, App::update, App::view)
+        // Bundled fonts: some Windows setups (and Wine) give iced no usable system font,
+        // which left text invisible. These also make every OS look the same.
+        .font(include_bytes!("../../../assets/fonts/Inter-Regular.ttf").as_slice())
+        .font(include_bytes!("../../../assets/fonts/Inter-Bold.ttf").as_slice())
+        .font(include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf").as_slice())
+        .default_font(ui::UI_FONT)
         .title(App::title)
         .theme(|_: &App| theme::theme())
         .subscription(App::subscription)
@@ -60,28 +71,9 @@ pub fn main() -> iced::Result {
         .run()
 }
 
-/// GUI preferences, saved as `gui.json` in the data folder.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct Prefs {
-    animated_background: bool,
-}
-
-impl Prefs {
-    fn load(paths: &Paths) -> Self {
-        std::fs::read(paths.root.join("gui.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(Self {
-                animated_background: true,
-            })
-    }
-
-    fn save(&self, paths: &Paths) {
-        if let Ok(bytes) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::create_dir_all(&paths.root);
-            let _ = std::fs::write(paths.root.join("gui.json"), bytes);
-        }
-    }
+/// Whether iced was told to draw on the CPU (set in `main` before the app starts).
+fn cpu_renderer() -> bool {
+    std::env::var("ICED_BACKEND").is_ok_and(|b| b.starts_with("tiny-skia"))
 }
 
 pub struct App {
@@ -106,7 +98,7 @@ pub struct App {
     crashes: HashMap<String, CrashInfo>,
     logo: iced::widget::image::Handle,
     textures: Option<Arc<GameTextures>>,
-    prefs: Prefs,
+    settings: Settings,
     /// Shaders need the GPU renderer; the CPU one (low-memory mode) gets a static backdrop.
     gpu: bool,
     hovered: Option<String>,
@@ -114,6 +106,8 @@ pub struct App {
     refreshing_versions: bool,
     /// Modpack installs in progress, by Modrinth project id or file path.
     pack_jobs: HashMap<String, Job>,
+    /// Which loaders have a release for each Minecraft version (checked when picked).
+    loader_support: HashMap<String, HashMap<LoaderKind, Load<bool>>>,
 }
 
 /// A launch in progress: downloading, then playing.
@@ -135,6 +129,7 @@ pub enum Screen {
     Accounts { name: String },
     Mods(ModsView),
     Modpacks(PacksView),
+    Settings(SettingsForm),
 }
 
 /// Something loaded in the background.
@@ -150,6 +145,8 @@ pub struct LoaderPick {
     versions: Option<Load<Vec<LoaderVersion>>>,
     version: Option<String>,
     optifine_jar: Option<PathBuf>,
+    /// OptiFine via the one-click open-source alternative (default) rather than a jar.
+    optifine_alt: bool,
 }
 
 pub struct NewInstanceForm {
@@ -158,6 +155,26 @@ pub struct NewInstanceForm {
     filter: VersionFilter,
     low_end: bool,
     loader: LoaderPick,
+    /// Worlds (folders or .zip files) to import once the instance exists.
+    worlds: Vec<PathBuf>,
+}
+
+/// Which folder a Settings "Change…" button is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderKind {
+    GameFiles,
+    Instances,
+}
+
+pub struct SettingsForm {
+    data_dir: PathBuf,
+    /// `None` keeps instances inside the game files folder.
+    instances_dir: Option<PathBuf>,
+    move_files: bool,
+    renderer: nethernode_core::settings::Renderer,
+    animated_background: bool,
+    /// Files are being moved.
+    busy: bool,
 }
 
 /// Which Minecraft versions the dropdown lists.
@@ -305,6 +322,23 @@ pub enum Message {
     PackPicked(Option<PathBuf>),
     PackJob(String, game::JobEvent),
     CloseRequested(window::Id),
+    LoaderSupport(String, LoaderKind, Result<bool, String>),
+    OptiFineAlternative(bool),
+    NewAddWorlds(bool),
+    NewWorldsPicked(Vec<PathBuf>),
+    RemoveNewWorld(usize),
+    EditImportWorlds(bool),
+    EditWorldsPicked(Vec<PathBuf>),
+    WorldsImported(String, Result<Vec<String>, String>),
+    ShowSettings,
+    SettingsPick(FolderKind),
+    SettingsPicked(FolderKind, Option<PathBuf>),
+    SettingsResetInstances,
+    SettingsMoveFiles(bool),
+    SettingsRenderer(nethernode_core::settings::Renderer),
+    SettingsAnimation(bool),
+    SaveSettings,
+    SettingsSaved(Result<Settings, String>),
     /// Debug builds only: screenshot each screen to `$NETHERNODE_SNAPSHOT` (see snapshot.rs).
     #[cfg(debug_assertions)]
     Snapshot(snapshot::Step),
@@ -337,11 +371,12 @@ fn load_textures(paths: Paths) -> Task<Message> {
 
 impl App {
     fn new() -> (Self, Task<Message>) {
-        let paths = Paths::new(Paths::default_root());
+        let settings = Settings::load();
+        let paths = settings.paths();
         let interrupted = Instance::clean_interrupted(&paths);
         let instances = Instance::list(&paths).unwrap_or_default();
         let accounts = Accounts::load(&paths).unwrap_or_default();
-        let gpu = std::env::var("ICED_BACKEND").map_or(true, |b| !b.starts_with("tiny-skia"));
+        let gpu = !cpu_renderer();
         let mut app = Self {
             selected: instances.first().map(|i| i.name.clone()),
             instances,
@@ -358,11 +393,12 @@ impl App {
             crashes: HashMap::new(),
             logo: icon::logo(),
             textures: None,
-            prefs: Prefs::load(&paths),
+            settings,
             gpu,
             hovered: None,
             refreshing_versions: true,
             pack_jobs: HashMap::new(),
+            loader_support: HashMap::new(),
             paths: paths.clone(),
         };
         if !interrupted.is_empty() {
@@ -408,7 +444,9 @@ impl App {
 
     /// The background animates unless turned off, unsupported, or a game needs the GPU.
     fn animating(&self) -> bool {
-        self.gpu && self.prefs.animated_background && self.runs.values().all(|r| r.heap.is_none())
+        self.gpu
+            && self.settings.animated_background
+            && self.runs.values().all(|r| r.heap.is_none())
     }
 
     fn error(&mut self, msg: impl Into<String>) {
@@ -547,6 +585,78 @@ impl App {
         )
     }
 
+    /// Check which loaders have a release for the picker's Minecraft version (cached).
+    fn check_loader_support(&mut self) -> Task<Message> {
+        let Some(mc) = self.picker_minecraft() else {
+            return Task::none();
+        };
+        let known = self.loader_support.entry(mc.clone()).or_default();
+        let mut tasks = Vec::new();
+        for kind in [
+            LoaderKind::Fabric,
+            LoaderKind::Quilt,
+            LoaderKind::Forge,
+            LoaderKind::NeoForge,
+        ] {
+            if known.contains_key(&kind) {
+                continue;
+            }
+            known.insert(kind, Load::Loading);
+            let mc = mc.clone();
+            tasks.push(Task::perform(
+                async move {
+                    let found = loader::versions(&download::client(), kind, &mc).await;
+                    (
+                        mc,
+                        kind,
+                        found.map(|v| !v.is_empty()).map_err(|e| e.to_string()),
+                    )
+                },
+                |(mc, kind, result)| Message::LoaderSupport(mc, kind, result),
+            ));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Whether `kind` is known to have no release for `mc` (unknown counts as available).
+    pub fn loader_unavailable(&self, mc: &str, kind: LoaderKind) -> bool {
+        let lookup = if kind == LoaderKind::OptiFine {
+            return false;
+        } else {
+            kind
+        };
+        matches!(
+            self.loader_support.get(mc).and_then(|m| m.get(&lookup)),
+            Some(Load::Ready(false))
+        )
+    }
+
+    /// Copy worlds (folders or .zip files) into `instance` in the background.
+    fn import_worlds(&self, instance: &Instance, sources: Vec<PathBuf>) -> Task<Message> {
+        if sources.is_empty() {
+            return Task::none();
+        }
+        let paths = self.paths.clone();
+        let instance = instance.clone();
+        let name = instance.name.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    sources
+                        .iter()
+                        .map(|src| {
+                            nethernode_core::worlds::import(&paths, &instance, src)
+                                .map_err(|e| e.to_string())
+                        })
+                        .collect::<Result<Vec<String>, String>>()
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+            },
+            move |result| Message::WorldsImported(name.clone(), result),
+        )
+    }
+
     /// Install the picked loader on `instance` as a background job.
     fn start_loader_job(&mut self, instance: Instance, pick: &LoaderPick) -> Task<Message> {
         let Some(kind) = pick.kind else {
@@ -556,13 +666,49 @@ impl App {
         let paths = self.paths.clone();
         let version = pick.version.clone();
         let jar = pick.optifine_jar.clone();
-        self.jobs.insert(
-            name.clone(),
-            Job {
-                label: format!("Installing {kind}"),
-                stage: None,
-            },
-        );
+        let alternative = kind == LoaderKind::OptiFine && pick.optifine_alt;
+        let label = if alternative {
+            "Installing OptiFine alternative".to_string()
+        } else {
+            format!("Installing {kind}")
+        };
+        self.jobs.insert(name.clone(), Job { label, stage: None });
+        if alternative {
+            let stream = game::job(move |progress| async move {
+                let http = download::client();
+                let mut instance = instance;
+                loader::apply(
+                    &http,
+                    &paths,
+                    &mut instance,
+                    LoaderKind::Fabric,
+                    None,
+                    &progress,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                let slugs: Vec<&str> = mods::OPTIFINE_ALTERNATIVE
+                    .iter()
+                    .map(|(slug, _)| *slug)
+                    .collect();
+                let (installed, skipped) =
+                    mods::install_preset(&http, &paths, &instance, &slugs, &progress)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                let mut msg = format!(
+                    "OptiFine alternative installed ({} mods on Fabric)",
+                    installed.len()
+                );
+                if !skipped.is_empty() {
+                    msg.push_str(&format!(
+                        "; not yet available for this version: {}",
+                        skipped.join(", ")
+                    ));
+                }
+                Ok(msg)
+            });
+            return Task::run(stream, move |event| Message::Job(name.clone(), event));
+        }
         let stream = game::job(move |progress| async move {
             let http = download::client();
             let mut instance = instance;
@@ -816,8 +962,10 @@ impl App {
                 }
             }
             Message::ToggleAnimation => {
-                self.prefs.animated_background = !self.prefs.animated_background;
-                self.prefs.save(&self.paths);
+                self.settings.animated_background = !self.settings.animated_background;
+                if let Err(e) = self.settings.save() {
+                    self.error(format!("Couldn't save settings: {e}"));
+                }
             }
 
             Message::OpenFolder(path) => {
@@ -869,11 +1017,16 @@ impl App {
                         versions: None,
                         version: None,
                         optifine_jar: None,
+                        optifine_alt: true,
                     },
+                    worlds: Vec::new(),
                 });
                 // Always offer Mojang's current list, not just what was cached at startup.
                 self.refreshing_versions = true;
-                return load_versions(self.paths.clone());
+                return Task::batch([
+                    load_versions(self.paths.clone()),
+                    self.check_loader_support(),
+                ]);
             }
             Message::NewName(name) => {
                 if let Screen::NewInstance(f) = &mut self.screen {
@@ -885,8 +1038,8 @@ impl App {
                     f.version = Some(v);
                     f.loader.optifine_jar = None;
                 }
-                // Loader versions depend on the Minecraft version.
-                return self.load_loader_versions();
+                // Loader versions (and which loaders exist at all) depend on the version.
+                return Task::batch([self.load_loader_versions(), self.check_loader_support()]);
             }
             Message::NewFilter(filter) => {
                 if let Screen::NewInstance(f) = &mut self.screen {
@@ -906,7 +1059,10 @@ impl App {
                     self.error("Pick a Minecraft version first");
                     return Task::none();
                 };
-                if f.loader.kind == Some(LoaderKind::OptiFine) && f.loader.optifine_jar.is_none() {
+                if f.loader.kind == Some(LoaderKind::OptiFine)
+                    && !f.loader.optifine_alt
+                    && f.loader.optifine_jar.is_none()
+                {
                     self.error("Choose the OptiFine jar you downloaded first");
                     return Task::none();
                 }
@@ -925,7 +1081,11 @@ impl App {
                         self.reload_instances();
                         self.selected = Some(name);
                         self.notice = None;
-                        return self.start_loader_job(instance, &form.loader);
+                        let worlds = self.import_worlds(&instance, form.worlds.clone());
+                        return Task::batch([
+                            worlds,
+                            self.start_loader_job(instance, &form.loader),
+                        ]);
                     }
                     Err(e) => self.error(e.to_string()),
                 }
@@ -957,10 +1117,15 @@ impl App {
                         versions: None,
                         version: current,
                         optifine_jar: None,
+                        // An existing real-OptiFine instance shows the jar route.
+                        optifine_alt: !i
+                            .loader
+                            .as_ref()
+                            .is_some_and(|l| l.kind == LoaderKind::OptiFine),
                     },
                 };
                 self.screen = Screen::EditInstance(form);
-                return self.load_loader_versions();
+                return Task::batch([self.load_loader_versions(), self.check_loader_support()]);
             }
             Message::EditAutoMemory(on) => {
                 if let Screen::EditInstance(f) = &mut self.screen {
@@ -1040,7 +1205,7 @@ impl App {
                     (None, None) => false,
                     // OptiFine has no version list; picking a new jar is the change.
                     (Some((LoaderKind::OptiFine, _)), Some((LoaderKind::OptiFine, _))) => {
-                        f.loader.optifine_jar.is_some()
+                        f.loader.optifine_jar.is_some() || f.loader.optifine_alt
                     }
                     (Some((ck, cv)), Some((wk, wv))) => ck != wk || cv != wv,
                     _ => true,
@@ -1048,6 +1213,7 @@ impl App {
                 if wanted.is_some_and(|(k, _)| k == LoaderKind::OptiFine)
                     && loader_changed
                     && f.loader.optifine_jar.is_none()
+                    && !f.loader.optifine_alt
                 {
                     self.error("Choose the OptiFine jar you downloaded first");
                     return Task::none();
@@ -1070,6 +1236,192 @@ impl App {
                     return self.start_loader_job(instance, &form.loader);
                 }
             }
+
+            Message::LoaderSupport(mc, kind, result) => {
+                // A failed check (e.g. offline) leaves the loader selectable.
+                let state = match result {
+                    Ok(available) => Load::Ready(available),
+                    Err(e) => Load::Failed(e),
+                };
+                self.loader_support
+                    .entry(mc)
+                    .or_default()
+                    .insert(kind, state);
+            }
+            Message::OptiFineAlternative(on) => {
+                if let Some(pick) = self.picker_mut() {
+                    pick.optifine_alt = on;
+                }
+            }
+
+            Message::NewAddWorlds(zip) => return pick_worlds(zip, Message::NewWorldsPicked),
+            Message::NewWorldsPicked(sources) => {
+                if let Screen::NewInstance(f) = &mut self.screen {
+                    for source in sources {
+                        if !f.worlds.contains(&source) {
+                            f.worlds.push(source);
+                        }
+                    }
+                }
+            }
+            Message::RemoveNewWorld(index) => {
+                if let Screen::NewInstance(f) = &mut self.screen
+                    && index < f.worlds.len()
+                {
+                    f.worlds.remove(index);
+                }
+            }
+            Message::EditImportWorlds(zip) => return pick_worlds(zip, Message::EditWorldsPicked),
+            Message::EditWorldsPicked(sources) => {
+                let Screen::EditInstance(f) = &self.screen else {
+                    return Task::none();
+                };
+                let Some(instance) = self.instance(&f.original).cloned() else {
+                    return Task::none();
+                };
+                return self.import_worlds(&instance, sources);
+            }
+            Message::WorldsImported(name, result) => match result {
+                Ok(worlds) if worlds.is_empty() => {}
+                Ok(worlds) => {
+                    self.notice = Some((
+                        false,
+                        format!("Imported into {name}: {}", worlds.join(", ")),
+                    ))
+                }
+                Err(e) => self.error(format!("Couldn't import the world into {name}: {e}")),
+            },
+
+            Message::ShowSettings => {
+                let default_instances = self.paths.root.join("instances");
+                self.screen = Screen::Settings(SettingsForm {
+                    data_dir: self.paths.root.clone(),
+                    instances_dir: Some(self.paths.instances()).filter(|d| *d != default_instances),
+                    move_files: true,
+                    renderer: self.settings.renderer,
+                    animated_background: self.settings.animated_background,
+                    busy: false,
+                });
+            }
+            Message::SettingsPick(which) => {
+                let title = match which {
+                    FolderKind::GameFiles => "Folder for game files (versions, libraries, Java)",
+                    FolderKind::Instances => "Folder for instances and worlds",
+                };
+                return Task::perform(
+                    rfd::AsyncFileDialog::new().set_title(title).pick_folder(),
+                    move |folder| {
+                        Message::SettingsPicked(which, folder.map(|f| f.path().to_path_buf()))
+                    },
+                );
+            }
+            Message::SettingsPicked(which, Some(folder)) => {
+                if let Screen::Settings(f) = &mut self.screen {
+                    match which {
+                        FolderKind::GameFiles => f.data_dir = folder,
+                        FolderKind::Instances => f.instances_dir = Some(folder),
+                    }
+                }
+            }
+            Message::SettingsPicked(_, None) => {}
+            Message::SettingsResetInstances => {
+                if let Screen::Settings(f) = &mut self.screen {
+                    f.instances_dir = None;
+                }
+            }
+            Message::SettingsMoveFiles(on) => {
+                if let Screen::Settings(f) = &mut self.screen {
+                    f.move_files = on;
+                }
+            }
+            Message::SettingsRenderer(renderer) => {
+                if let Screen::Settings(f) = &mut self.screen {
+                    f.renderer = renderer;
+                }
+            }
+            Message::SettingsAnimation(on) => {
+                if let Screen::Settings(f) = &mut self.screen {
+                    f.animated_background = on;
+                }
+            }
+            Message::SaveSettings => {
+                let busy =
+                    !self.runs.is_empty() || !self.jobs.is_empty() || !self.pack_jobs.is_empty();
+                let Screen::Settings(f) = &mut self.screen else {
+                    return Task::none();
+                };
+                let new = Settings {
+                    // Stored only when it differs from the platform default.
+                    data_dir: Some(f.data_dir.clone())
+                        .filter(|d| *d != nethernode_core::paths::Paths::default_root()),
+                    instances_dir: f.instances_dir.clone(),
+                    renderer: f.renderer,
+                    animated_background: f.animated_background,
+                };
+                let old = self.paths.clone();
+                let target = new.paths();
+                let folders_changed =
+                    target.root != old.root || target.instances() != old.instances();
+                if folders_changed && busy {
+                    self.error("Stop running games and finish installs before moving folders");
+                    return Task::none();
+                }
+                if !(folders_changed && f.move_files) {
+                    return Task::done(Message::SettingsSaved(Ok(new)));
+                }
+                f.busy = true;
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            use nethernode_core::settings::move_dir;
+                            // Instances first (they may live inside the game files folder).
+                            if target.instances() != old.instances() {
+                                move_dir(&old.instances(), &target.instances())
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            if target.root != old.root {
+                                move_dir(&old.root, &target.root).map_err(|e| e.to_string())?;
+                            }
+                            Ok(new)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    Message::SettingsSaved,
+                );
+            }
+            Message::SettingsSaved(result) => match result {
+                Ok(new) => {
+                    let renderer_changed = new.renderer != self.settings.renderer;
+                    if let Err(e) = new.save() {
+                        self.error(format!("Couldn't save settings: {e}"));
+                        return Task::none();
+                    }
+                    self.paths = new.paths();
+                    self.settings = new;
+                    self.accounts = Accounts::load(&self.paths).unwrap_or_default();
+                    self.reload_instances();
+                    self.screen = Screen::Home;
+                    self.notice = Some((
+                        false,
+                        if renderer_changed {
+                            "Settings saved. Restart netherNode to switch the renderer.".into()
+                        } else {
+                            "Settings saved".into()
+                        },
+                    ));
+                    return Task::batch([
+                        load_versions(self.paths.clone()),
+                        load_textures(self.paths.clone()),
+                    ]);
+                }
+                Err(e) => {
+                    if let Screen::Settings(f) = &mut self.screen {
+                        f.busy = false;
+                    }
+                    self.error(format!("Couldn't move the folders: {e}"));
+                }
+            },
 
             Message::PickLoader(kind) => {
                 if let Some(pick) = self.picker_mut() {
@@ -1431,6 +1783,36 @@ impl App {
             }
         }
         Task::none()
+    }
+}
+
+/// Ask for world folders (each containing level.dat) or world .zip files.
+fn pick_worlds(zip: bool, done: fn(Vec<PathBuf>) -> Message) -> Task<Message> {
+    let to_paths = move |files: Option<Vec<rfd::FileHandle>>| {
+        done(
+            files
+                .unwrap_or_default()
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect(),
+        )
+    };
+    let dialog = rfd::AsyncFileDialog::new();
+    if zip {
+        Task::perform(
+            dialog
+                .set_title("Choose world .zip files")
+                .add_filter("World backup", &["zip"])
+                .pick_files(),
+            to_paths,
+        )
+    } else {
+        Task::perform(
+            dialog
+                .set_title("Choose world folders (the ones with level.dat inside)")
+                .pick_folders(),
+            to_paths,
+        )
     }
 }
 

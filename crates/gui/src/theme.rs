@@ -55,11 +55,35 @@ fn rim(color: Color, radius: f32) -> Border {
     }
 }
 
+/// Set once at startup. The CPU renderer gets no blurred shadows (slow there, and they
+/// smeared dark patches over the UI on some Windows machines) and denser glass, since there
+/// is no portal behind it to show through.
+static CPU_RENDERER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_cpu_renderer(on: bool) {
+    CPU_RENDERER.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn cpu() -> bool {
+    CPU_RENDERER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn glow(color: Color, blur: f32) -> Shadow {
+    if cpu() {
+        return Shadow::default();
+    }
     Shadow {
         color,
         offset: Vector::new(0.0, 6.0),
         blur_radius: blur,
+    }
+}
+
+fn glass_tint(dense: bool) -> Color {
+    match (dense, cpu()) {
+        (false, false) => GLASS,
+        (true, false) => GLASS_DENSE,
+        (_, true) => Color::from_rgba(0.06, 0.036, 0.1, 0.92),
     }
 }
 
@@ -86,7 +110,7 @@ pub fn static_backdrop(_: &Theme) -> container::Style {
 
 pub fn glass(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(GLASS)),
+        background: Some(Background::Color(glass_tint(false))),
         border: rim(RIM, 18.0),
         shadow: glow(Color::from_rgba(0.0, 0.0, 0.0, 0.45), 28.0),
         text_color: Some(TEXT),
@@ -96,7 +120,7 @@ pub fn glass(_: &Theme) -> container::Style {
 
 pub fn glass_dense(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(GLASS_DENSE)),
+        background: Some(Background::Color(glass_tint(true))),
         border: rim(RIM, 18.0),
         shadow: glow(Color::from_rgba(0.0, 0.0, 0.0, 0.5), 32.0),
         text_color: Some(TEXT),

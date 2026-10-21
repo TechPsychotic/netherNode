@@ -16,6 +16,9 @@ pub enum Error {
         expected: String,
         actual: String,
     },
+    /// The requested mod (or similar) has no release for this game version and loader.
+    #[error("{0}")]
+    NotAvailable(String),
     #[error("{0}")]
     Other(String),
 }

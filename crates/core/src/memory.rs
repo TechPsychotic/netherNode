@@ -153,18 +153,16 @@ pub fn gc_flags(plan: &HeapPlan, user_args: &[String]) -> Vec<String> {
     flags.into_iter().map(String::from).collect()
 }
 
-/// Lighter defaults for a new instance's `options.txt` on low-memory machines. Keys a version
-/// does not know are ignored by the game.
+/// Lighter defaults for a new instance's `options.txt` on low-memory machines.
+///
+/// Deliberately minimal: graphics keys such as `graphicsMode`, `fancyGraphics` or
+/// `mipmapLevels` changed meaning across versions, and newer Minecraft runs its old-settings
+/// converters over a file without a `version:` line. Testers saw floating terrain in 26.x
+/// with the old, larger preset, so only these long-stable keys are set.
 pub const LOW_END_OPTIONS: &str = "\
-renderDistance:6
-simulationDistance:5
+renderDistance:8
+simulationDistance:6
 maxFps:60
-particles:2
-mipmapLevels:0
-entityDistanceScaling:0.75
-graphicsMode:0
-fancyGraphics:false
-renderClouds:false
 ";
 
 #[cfg(test)]
