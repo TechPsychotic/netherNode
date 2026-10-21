@@ -1,33 +1,36 @@
 // No console window behind the GUI on Windows (release builds only, so debug output still shows).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod background;
 mod game;
 mod icon;
 #[cfg(debug_assertions)]
 mod snapshot;
+mod textures;
 mod theme;
+mod ui;
 
-use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures::channel::oneshot;
-use iced::widget::{
-    button, checkbox, column, combo_box, container, pick_list, progress_bar, row, rule, scrollable,
-    space, text, text_input,
-};
-use iced::{Alignment, Element, Font, Length, Subscription, Task, window};
+use iced::widget::combo_box;
+use iced::{Subscription, Task, window};
 use nethernode_core::account::Accounts;
 use nethernode_core::crash::CrashInfo;
 use nethernode_core::download;
 use nethernode_core::instance::Instance;
+use nethernode_core::loader::{self, LoaderKind, LoaderVersion};
 use nethernode_core::memory::SystemMemory;
+use nethernode_core::mods::{self, InstalledMod, SearchHit};
 use nethernode_core::paths::Paths;
 use nethernode_core::version::{self, ManifestEntry};
 
+use textures::GameTextures;
+
 /// Lines of game output kept per instance; older lines are dropped to bound memory.
 const LOG_LIMIT: usize = 2000;
-/// Lines actually laid out in the console; laying out thousands of lines every frame is slow.
-const LOG_VISIBLE: usize = 400;
 
 pub fn main() -> iced::Result {
     // On low-memory machines draw with the CPU renderer: about 40 MB instead of about 90 MB
@@ -41,8 +44,8 @@ pub fn main() -> iced::Result {
         .theme(|_: &App| theme::theme())
         .subscription(App::subscription)
         .window(window::Settings {
-            size: iced::Size::new(1040.0, 680.0),
-            min_size: Some(iced::Size::new(760.0, 480.0)),
+            size: iced::Size::new(1180.0, 760.0),
+            min_size: Some(iced::Size::new(900.0, 600.0)),
             icon: icon::window_icon(),
             // We stop running games before exiting; see Message::CloseRequested.
             exit_on_close_request: false,
@@ -57,7 +60,31 @@ pub fn main() -> iced::Result {
         .run()
 }
 
-struct App {
+/// GUI preferences, saved as `gui.json` in the data folder.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Prefs {
+    animated_background: bool,
+}
+
+impl Prefs {
+    fn load(paths: &Paths) -> Self {
+        std::fs::read(paths.root.join("gui.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or(Self {
+                animated_background: true,
+            })
+    }
+
+    fn save(&self, paths: &Paths) {
+        if let Ok(bytes) = serde_json::to_vec_pretty(self) {
+            let _ = std::fs::create_dir_all(&paths.root);
+            let _ = std::fs::write(paths.root.join("gui.json"), bytes);
+        }
+    }
+}
+
+pub struct App {
     paths: Paths,
     instances: Vec<Instance>,
     selected: Option<String>,
@@ -66,6 +93,8 @@ struct App {
     /// The version manifest, once it has loaded.
     versions: Option<Vec<ManifestEntry>>,
     runs: HashMap<String, Run>,
+    /// Loader installs and other long jobs, per instance.
+    jobs: HashMap<String, Job>,
     logs: HashMap<String, VecDeque<String>>,
     notice: Option<(bool, String)>,
     /// Delete was clicked once for this instance; the second click deletes.
@@ -76,47 +105,97 @@ struct App {
     /// The last crash of each instance, shown until dismissed or the next launch.
     crashes: HashMap<String, CrashInfo>,
     logo: iced::widget::image::Handle,
+    textures: Option<Arc<GameTextures>>,
+    prefs: Prefs,
+    /// Shaders need the GPU renderer; the CPU one (low-memory mode) gets a static backdrop.
+    gpu: bool,
+    hovered: Option<String>,
 }
 
 /// A launch in progress: downloading, then playing.
-struct Run {
+pub struct Run {
     stage: Option<(String, u64, u64)>,
     heap: Option<String>,
     stop: Option<oneshot::Sender<()>>,
 }
 
-enum Screen {
+pub struct Job {
+    label: String,
+    stage: Option<(String, u64, u64)>,
+}
+
+pub enum Screen {
     Home,
     NewInstance(NewInstanceForm),
     EditInstance(EditForm),
     Accounts { name: String },
+    Mods(ModsView),
 }
 
-struct NewInstanceForm {
+/// Something loaded in the background.
+pub enum Load<T> {
+    Loading,
+    Ready(T),
+    Failed(String),
+}
+
+/// The loader choice shared by the new-instance and edit forms.
+pub struct LoaderPick {
+    kind: Option<LoaderKind>,
+    versions: Option<Load<Vec<LoaderVersion>>>,
+    version: Option<String>,
+    optifine_jar: Option<PathBuf>,
+}
+
+pub struct NewInstanceForm {
     name: String,
     version: Option<String>,
     snapshots: bool,
     low_end: bool,
     choices: combo_box::State<String>,
+    loader: LoaderPick,
 }
 
-struct EditForm {
+pub struct EditForm {
     original: String,
     auto_memory: bool,
     max_memory: String,
     java_path: String,
     jvm_args: String,
+    loader: LoaderPick,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModsTab {
+    Installed,
+    Browse,
+}
+
+pub struct ModsView {
+    instance: String,
+    tab: ModsTab,
+    installed: Vec<InstalledMod>,
+    query: String,
+    results: Option<Load<Vec<SearchHit>>>,
+    total: u64,
+    /// Project ids being installed right now.
+    installing: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
-enum Message {
+pub enum Message {
     Select(String),
+    Hover(Option<String>),
     Play(String),
     Stop(String),
     Game(String, game::Event),
+    Job(String, game::JobEvent),
     VersionsLoaded(Result<Vec<ManifestEntry>, String>),
+    TexturesLoaded(Option<Arc<GameTextures>>),
+    ToggleAnimation,
     OpenFolder(PathBuf),
     OpenFile(PathBuf),
+    OpenUrl(String),
     CopyCrash(String),
     DismissCrash(String),
     Delete(String),
@@ -134,15 +213,45 @@ enum Message {
     EditJava(String),
     EditJvmArgs(String),
     SaveEdit,
+    PickLoader(Option<LoaderKind>),
+    LoaderVersions(LoaderKind, String, Result<Vec<LoaderVersion>, String>),
+    PickLoaderVersion(String),
+    BrowseOptiFine,
+    OptiFinePicked(Option<PathBuf>),
     ShowAccounts,
     AccountName(String),
     AddAccount,
     RemoveAccount(String),
     SetDefaultAccount(String),
+    ShowMods(String),
+    ModsTab(ModsTab),
+    ModsQuery(String),
+    ModsSearch,
+    ModsMore,
+    ModsResults(u32, Result<mods::SearchResults, String>),
+    InstallMod(String),
+    ModInstalled(String, Result<Vec<String>, String>),
+    ToggleMod(String, bool),
+    RemoveMod(String),
+    AddModFiles,
+    ModFilesPicked(Vec<PathBuf>),
+    FileDropped(PathBuf),
     CloseRequested(window::Id),
     /// Debug builds only: screenshot each screen to `$NETHERNODE_SNAPSHOT` (see snapshot.rs).
     #[cfg(debug_assertions)]
     Snapshot(snapshot::Step),
+}
+
+fn load_textures(paths: Paths) -> Task<Message> {
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || textures::load(&paths).map(Arc::new))
+                .await
+                .ok()
+                .flatten()
+        },
+        Message::TexturesLoaded,
+    )
 }
 
 impl App {
@@ -150,6 +259,7 @@ impl App {
         let paths = Paths::new(Paths::default_root());
         let instances = Instance::list(&paths).unwrap_or_default();
         let accounts = Accounts::load(&paths).unwrap_or_default();
+        let gpu = std::env::var("ICED_BACKEND").map_or(true, |b| !b.starts_with("tiny-skia"));
         let mut app = Self {
             selected: instances.first().map(|i| i.name.clone()),
             instances,
@@ -157,13 +267,18 @@ impl App {
             screen: Screen::Home,
             versions: None,
             runs: HashMap::new(),
+            jobs: HashMap::new(),
             logs: HashMap::new(),
             notice: None,
             confirm_delete: None,
             closing: false,
+            memory: SystemMemory::current(),
             crashes: HashMap::new(),
             logo: icon::logo(),
-            memory: SystemMemory::current(),
+            textures: None,
+            prefs: Prefs::load(&paths),
+            gpu,
+            hovered: None,
             paths: paths.clone(),
         };
         if app.accounts.accounts.is_empty() {
@@ -172,21 +287,23 @@ impl App {
             };
             app.notice = Some((
                 false,
-                "Welcome! Add an offline account to get started.".into(),
+                "Welcome to netherNode! Add an offline account to get started.".into(),
             ));
         }
-        let load = Task::perform(
+        let manifest_paths = paths.clone();
+        let load_versions = Task::perform(
             async move {
-                version::manifest(&download::client(), &paths)
+                version::manifest(&download::client(), &manifest_paths)
                     .await
                     .map(|m| m.versions)
                     .map_err(|e| e.to_string())
             },
             Message::VersionsLoaded,
         );
+        let tasks = Task::batch([load_versions, load_textures(paths)]);
         #[cfg(debug_assertions)]
-        let load = Task::batch([load, snapshot::start()]);
-        (app, load)
+        let tasks = Task::batch([tasks, snapshot::start()]);
+        (app, tasks)
     }
 
     fn title(&self) -> String {
@@ -197,11 +314,26 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        window::close_requests().map(Message::CloseRequested)
+        let drops = iced::event::listen_with(|event, _, _| match event {
+            iced::Event::Window(window::Event::FileDropped(path)) => {
+                Some(Message::FileDropped(path))
+            }
+            _ => None,
+        });
+        Subscription::batch([window::close_requests().map(Message::CloseRequested), drops])
+    }
+
+    /// The background animates unless turned off, unsupported, or a game needs the GPU.
+    fn animating(&self) -> bool {
+        self.gpu && self.prefs.animated_background && self.runs.values().all(|r| r.heap.is_none())
     }
 
     fn error(&mut self, msg: impl Into<String>) {
         self.notice = Some((true, msg.into()));
+    }
+
+    fn instance(&self, name: &str) -> Option<&Instance> {
+        self.instances.iter().find(|i| i.name == name)
     }
 
     fn reload_instances(&mut self) {
@@ -209,7 +341,7 @@ impl App {
         if self
             .selected
             .as_ref()
-            .is_none_or(|s| !self.instances.iter().any(|i| &i.name == s))
+            .is_none_or(|s| self.instance(s).is_none())
         {
             self.selected = self.instances.first().map(|i| i.name.clone());
         }
@@ -224,6 +356,150 @@ impl App {
             .collect()
     }
 
+    /// The Minecraft version the loader picker on the current screen applies to.
+    fn picker_minecraft(&self) -> Option<String> {
+        match &self.screen {
+            Screen::NewInstance(f) => f.version.clone(),
+            Screen::EditInstance(f) => self
+                .instance(&f.original)
+                .map(|i| i.minecraft_version().to_string()),
+            _ => None,
+        }
+    }
+
+    fn picker_mut(&mut self) -> Option<&mut LoaderPick> {
+        match &mut self.screen {
+            Screen::NewInstance(f) => Some(&mut f.loader),
+            Screen::EditInstance(f) => Some(&mut f.loader),
+            _ => None,
+        }
+    }
+
+    /// Fetch loader versions for the picker's current choice.
+    fn load_loader_versions(&mut self) -> Task<Message> {
+        let Some(mc) = self.picker_minecraft() else {
+            return Task::none();
+        };
+        let Some(pick) = self.picker_mut() else {
+            return Task::none();
+        };
+        let Some(kind) = pick.kind.filter(|k| *k != LoaderKind::OptiFine) else {
+            pick.versions = None;
+            return Task::none();
+        };
+        pick.versions = Some(Load::Loading);
+        Task::perform(
+            async move {
+                let result = loader::versions(&download::client(), kind, &mc)
+                    .await
+                    .map_err(|e| e.to_string());
+                (kind, mc, result)
+            },
+            |(kind, mc, result)| Message::LoaderVersions(kind, mc, result),
+        )
+    }
+
+    /// Install the picked loader on `instance` as a background job.
+    fn start_loader_job(&mut self, instance: Instance, pick: &LoaderPick) -> Task<Message> {
+        let Some(kind) = pick.kind else {
+            return Task::none();
+        };
+        let name = instance.name.clone();
+        let paths = self.paths.clone();
+        let version = pick.version.clone();
+        let jar = pick.optifine_jar.clone();
+        self.jobs.insert(
+            name.clone(),
+            Job {
+                label: format!("Installing {kind}"),
+                stage: None,
+            },
+        );
+        let stream = game::job(move |progress| async move {
+            let http = download::client();
+            let mut instance = instance;
+            let result = match (kind, jar) {
+                (LoaderKind::OptiFine, Some(jar)) => {
+                    loader::apply_optifine(&http, &paths, &mut instance, &jar, &progress).await
+                }
+                (LoaderKind::OptiFine, None) => Err(nethernode_core::Error::Other(
+                    "choose the OptiFine jar first".into(),
+                )),
+                _ => {
+                    loader::apply(
+                        &http,
+                        &paths,
+                        &mut instance,
+                        kind,
+                        version.as_deref(),
+                        &progress,
+                    )
+                    .await
+                }
+            };
+            result
+                .map(|()| format!("{kind} installed"))
+                .map_err(|e| e.to_string())
+        });
+        Task::run(stream, move |event| Message::Job(name.clone(), event))
+    }
+
+    fn mods_view(&mut self) -> Option<&mut ModsView> {
+        match &mut self.screen {
+            Screen::Mods(view) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The instance whose Mods screen is open.
+    fn mods_instance(&mut self) -> Option<Instance> {
+        let name = self.mods_view()?.instance.clone();
+        self.instance(&name).cloned()
+    }
+
+    fn refresh_mods(&mut self) {
+        let Some(instance) = self.mods_instance() else {
+            return;
+        };
+        let installed = mods::list(&self.paths, &instance).unwrap_or_default();
+        if let Some(view) = self.mods_view() {
+            view.installed = installed;
+        }
+    }
+
+    fn search_mods(&mut self, offset: u32) -> Task<Message> {
+        let Some(instance) = self.mods_instance() else {
+            return Task::none();
+        };
+        let Some(view) = self.mods_view() else {
+            return Task::none();
+        };
+        let query = view.query.clone();
+        if offset == 0 {
+            view.results = Some(Load::Loading);
+        }
+        Task::perform(
+            async move {
+                mods::search(&download::client(), &instance, &query, offset)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |result| Message::ModsResults(offset, result),
+        )
+    }
+
+    fn add_mod_file(&mut self, path: &std::path::Path) {
+        let Some(instance) = self.mods_instance() else {
+            self.error("Open an instance's Mods screen first, then drop mod files on the window");
+            return;
+        };
+        match mods::add_file(&self.paths, &instance, path) {
+            Ok(file) => self.notice = Some((false, format!("Added {file}"))),
+            Err(e) => self.error(e.to_string()),
+        }
+        self.refresh_mods();
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Select(name) => {
@@ -231,12 +507,13 @@ impl App {
                 self.confirm_delete = None;
                 self.screen = Screen::Home;
             }
+            Message::Hover(name) => self.hovered = name,
 
             Message::Play(name) => {
-                if self.runs.contains_key(&name) {
+                if self.runs.contains_key(&name) || self.jobs.contains_key(&name) {
                     return Task::none();
                 }
-                let Some(instance) = self.instances.iter().find(|i| i.name == name).cloned() else {
+                let Some(instance) = self.instance(&name).cloned() else {
                     return Task::none();
                 };
                 let account = match self.accounts.pick(None) {
@@ -260,12 +537,14 @@ impl App {
                 );
                 let log = self.logs.entry(name.clone()).or_default();
                 log.clear();
-                self.crashes.remove(&name);
                 log.push_back(format!(
                     "Launching {} as {}…",
                     instance.version, account.name
                 ));
+                self.crashes.remove(&name);
                 self.notice = None;
+                self.selected = Some(name.clone());
+                self.screen = Screen::Home;
                 let stream = game::launch(self.paths.clone(), instance, account, stop_rx);
                 return Task::run(stream, move |event| Message::Game(name.clone(), event));
             }
@@ -324,9 +603,39 @@ impl App {
                         if self.closing && self.runs.is_empty() {
                             return iced::exit();
                         }
+                        // The first launch may have downloaded the textures we were missing.
+                        if self.textures.is_none() {
+                            return load_textures(self.paths.clone());
+                        }
                     }
                 }
             }
+
+            Message::Job(name, event) => match event {
+                game::JobEvent::Stage { name: stage, total } => {
+                    if let Some(job) = self.jobs.get_mut(&name) {
+                        job.stage = Some((stage, 0, total));
+                    }
+                }
+                game::JobEvent::Advance => {
+                    if let Some((_, done, _)) =
+                        self.jobs.get_mut(&name).and_then(|j| j.stage.as_mut())
+                    {
+                        *done += 1;
+                    }
+                }
+                game::JobEvent::Done(result) => {
+                    self.jobs.remove(&name);
+                    self.reload_instances();
+                    match result {
+                        Ok(msg) => self.notice = Some((false, format!("{name}: {msg}"))),
+                        Err(e) => self.error(format!("{name}: {e}")),
+                    }
+                    if self.textures.is_none() {
+                        return load_textures(self.paths.clone());
+                    }
+                }
+            },
 
             Message::VersionsLoaded(result) => match result {
                 Ok(versions) => {
@@ -342,14 +651,25 @@ impl App {
                 Err(e) => self.error(format!("Couldn't load the version list: {e}")),
             },
 
+            Message::TexturesLoaded(textures) => {
+                if textures.is_some() {
+                    self.textures = textures;
+                }
+            }
+            Message::ToggleAnimation => {
+                self.prefs.animated_background = !self.prefs.animated_background;
+                self.prefs.save(&self.paths);
+            }
+
             Message::OpenFolder(path) => {
                 let _ = std::fs::create_dir_all(&path);
-                open_path(&path);
+                open_path(path.as_os_str());
             }
-            Message::OpenFile(path) => open_path(&path),
+            Message::OpenFile(path) => open_path(path.as_os_str()),
+            Message::OpenUrl(url) => open_path(std::ffi::OsStr::new(&url)),
             Message::CopyCrash(name) => {
                 if let Some(crash) = self.crashes.get(&name) {
-                    return iced::clipboard::write(crash_text(&name, crash));
+                    return iced::clipboard::write(ui::crash_text(&name, crash));
                 }
             }
             Message::DismissCrash(name) => {
@@ -383,6 +703,12 @@ impl App {
                     snapshots: false,
                     low_end: self.memory.is_low(),
                     choices: combo_box::State::new(choices),
+                    loader: LoaderPick {
+                        kind: None,
+                        versions: None,
+                        version: None,
+                        optifine_jar: None,
+                    },
                 });
             }
             Message::NewName(name) => {
@@ -393,7 +719,10 @@ impl App {
             Message::NewVersion(v) => {
                 if let Screen::NewInstance(f) = &mut self.screen {
                     f.version = Some(v);
+                    f.loader.optifine_jar = None;
                 }
+                // Loader versions depend on the Minecraft version.
+                return self.load_loader_versions();
             }
             Message::NewSnapshots(on) => {
                 let choices = self.version_choices(on);
@@ -412,42 +741,61 @@ impl App {
                     return Task::none();
                 };
                 let Some(version) = f.version.clone() else {
-                    self.error("Pick a version first");
+                    self.error("Pick a Minecraft version first");
                     return Task::none();
                 };
+                if f.loader.kind == Some(LoaderKind::OptiFine) && f.loader.optifine_jar.is_none() {
+                    self.error("Choose the OptiFine jar you downloaded first");
+                    return Task::none();
+                }
                 let name = if f.name.trim().is_empty() {
                     version.clone()
                 } else {
                     f.name.trim().to_string()
                 };
                 match Instance::create(&self.paths, &name, &version, f.low_end) {
-                    Ok(_) => {
+                    Ok(instance) => {
+                        let Screen::NewInstance(form) =
+                            std::mem::replace(&mut self.screen, Screen::Home)
+                        else {
+                            unreachable!("checked above")
+                        };
                         self.reload_instances();
                         self.selected = Some(name);
-                        self.screen = Screen::Home;
                         self.notice = None;
+                        return self.start_loader_job(instance, &form.loader);
                     }
                     Err(e) => self.error(e.to_string()),
                 }
             }
 
             Message::ShowEdit(name) => {
-                if let Some(i) = self.instances.iter().find(|i| i.name == name) {
-                    self.screen = Screen::EditInstance(EditForm {
-                        original: i.name.clone(),
-                        auto_memory: i.max_memory_mb.is_none(),
-                        max_memory: i
-                            .max_memory_mb
-                            .map(|m| m.to_string())
-                            .unwrap_or_else(|| self.memory.recommended_max_heap_mb().to_string()),
-                        java_path: i
-                            .java_path
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default(),
-                        jvm_args: i.jvm_args.join(" "),
-                    });
-                }
+                let Some(i) = self.instance(&name) else {
+                    return Task::none();
+                };
+                let current = i.loader.as_ref().map(|l| l.version.clone());
+                let form = EditForm {
+                    original: i.name.clone(),
+                    auto_memory: i.max_memory_mb.is_none(),
+                    max_memory: i
+                        .max_memory_mb
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|| self.memory.recommended_max_heap_mb().to_string()),
+                    java_path: i
+                        .java_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    jvm_args: i.jvm_args.join(" "),
+                    loader: LoaderPick {
+                        kind: i.loader.as_ref().map(|l| l.kind),
+                        versions: None,
+                        version: current,
+                        optifine_jar: None,
+                    },
+                };
+                self.screen = Screen::EditInstance(form);
+                return self.load_loader_versions();
             }
             Message::EditAutoMemory(on) => {
                 if let Screen::EditInstance(f) = &mut self.screen {
@@ -473,12 +821,7 @@ impl App {
                 let Screen::EditInstance(f) = &self.screen else {
                     return Task::none();
                 };
-                let Some(mut instance) = self
-                    .instances
-                    .iter()
-                    .find(|i| i.name == f.original)
-                    .cloned()
-                else {
+                let Some(mut instance) = self.instance(&f.original).cloned() else {
                     return Task::none();
                 };
                 instance.max_memory_mb = if f.auto_memory {
@@ -495,13 +838,96 @@ impl App {
                 let java = f.java_path.trim();
                 instance.java_path = (!java.is_empty()).then(|| PathBuf::from(java));
                 instance.jvm_args = f.jvm_args.split_whitespace().map(String::from).collect();
-                match instance.save(&self.paths) {
-                    Ok(()) => {
-                        self.reload_instances();
-                        self.screen = Screen::Home;
-                        self.notice = Some((false, "Saved".into()));
+
+                let current = instance
+                    .loader
+                    .as_ref()
+                    .map(|l| (l.kind, l.version.clone()));
+                let wanted = f
+                    .loader
+                    .kind
+                    .map(|k| (k, f.loader.version.clone().unwrap_or_default()));
+                let loader_changed = match (&current, &wanted) {
+                    (None, None) => false,
+                    // OptiFine has no version list; picking a new jar is the change.
+                    (Some((LoaderKind::OptiFine, _)), Some((LoaderKind::OptiFine, _))) => {
+                        f.loader.optifine_jar.is_some()
                     }
-                    Err(e) => self.error(e.to_string()),
+                    (Some((ck, cv)), Some((wk, wv))) => ck != wk || cv != wv,
+                    _ => true,
+                };
+                if wanted.is_some_and(|(k, _)| k == LoaderKind::OptiFine)
+                    && loader_changed
+                    && f.loader.optifine_jar.is_none()
+                {
+                    self.error("Choose the OptiFine jar you downloaded first");
+                    return Task::none();
+                }
+                if loader_changed {
+                    // Back to vanilla first; a new loader (if any) installs on top below.
+                    let _ = loader::remove(&self.paths, &mut instance);
+                }
+                if let Err(e) = instance.save(&self.paths) {
+                    self.error(e.to_string());
+                    return Task::none();
+                }
+                let Screen::EditInstance(form) = std::mem::replace(&mut self.screen, Screen::Home)
+                else {
+                    unreachable!("checked above")
+                };
+                self.reload_instances();
+                self.notice = Some((false, "Saved".into()));
+                if loader_changed {
+                    return self.start_loader_job(instance, &form.loader);
+                }
+            }
+
+            Message::PickLoader(kind) => {
+                if let Some(pick) = self.picker_mut() {
+                    pick.kind = kind;
+                    pick.version = None;
+                    pick.optifine_jar = None;
+                }
+                return self.load_loader_versions();
+            }
+            Message::LoaderVersions(kind, mc, result) => {
+                let still_wanted = self.picker_minecraft().as_deref() == Some(mc.as_str());
+                if let Some(pick) = self
+                    .picker_mut()
+                    .filter(|p| still_wanted && p.kind == Some(kind))
+                {
+                    match result {
+                        Ok(versions) => {
+                            let keep = pick
+                                .version
+                                .clone()
+                                .filter(|v| versions.iter().any(|x| &x.version == v));
+                            pick.version = keep.or_else(|| {
+                                loader::recommended(&versions).map(|v| v.version.clone())
+                            });
+                            pick.versions = Some(Load::Ready(versions));
+                        }
+                        Err(e) => pick.versions = Some(Load::Failed(e)),
+                    }
+                }
+            }
+            Message::PickLoaderVersion(v) => {
+                if let Some(pick) = self.picker_mut() {
+                    pick.version = Some(v);
+                }
+            }
+            Message::BrowseOptiFine => {
+                return Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Choose the OptiFine jar you downloaded")
+                        .add_filter("OptiFine jar", &["jar"])
+                        .pick_file(),
+                    |file| Message::OptiFinePicked(file.map(|f| f.path().to_path_buf())),
+                );
+            }
+            Message::OptiFinePicked(path) => {
+                if let (Some(path), Some(pick)) = (path, self.picker_mut()) {
+                    pick.optifine_jar = Some(path);
                 }
             }
 
@@ -550,6 +976,143 @@ impl App {
                 }
             }
 
+            Message::ShowMods(name) => {
+                let Some(instance) = self.instance(&name).cloned() else {
+                    return Task::none();
+                };
+                let has_loader = instance
+                    .loader
+                    .as_ref()
+                    .is_some_and(|l| !l.kind.mod_loaders().is_empty());
+                self.screen = Screen::Mods(ModsView {
+                    installed: mods::list(&self.paths, &instance).unwrap_or_default(),
+                    instance: name,
+                    tab: ModsTab::Installed,
+                    query: String::new(),
+                    results: None,
+                    total: 0,
+                    installing: HashSet::new(),
+                });
+                if has_loader {
+                    return self.search_mods(0); // preload popular mods for the Browse tab
+                }
+            }
+            Message::ModsTab(tab) => {
+                if let Some(view) = self.mods_view() {
+                    view.tab = tab;
+                }
+            }
+            Message::ModsQuery(q) => {
+                if let Some(view) = self.mods_view() {
+                    view.query = q;
+                }
+            }
+            Message::ModsSearch => {
+                if let Some(view) = self.mods_view() {
+                    view.tab = ModsTab::Browse;
+                }
+                return self.search_mods(0);
+            }
+            Message::ModsMore => {
+                let offset = match self.mods_view().map(|v| &v.results) {
+                    Some(Some(Load::Ready(hits))) => hits.len() as u32,
+                    _ => return Task::none(),
+                };
+                return self.search_mods(offset);
+            }
+            Message::ModsResults(offset, result) => {
+                if let Some(view) = self.mods_view() {
+                    match result {
+                        Ok(found) => {
+                            view.total = found.total_hits;
+                            match &mut view.results {
+                                Some(Load::Ready(hits)) if offset > 0 => hits.extend(found.hits),
+                                _ => view.results = Some(Load::Ready(found.hits)),
+                            }
+                        }
+                        Err(e) => view.results = Some(Load::Failed(e)),
+                    }
+                }
+            }
+            Message::InstallMod(project) => {
+                let Some(instance) = self.mods_instance() else {
+                    return Task::none();
+                };
+                if let Some(view) = self.mods_view() {
+                    view.installing.insert(project.clone());
+                }
+                let paths = self.paths.clone();
+                let id = project.clone();
+                return Task::perform(
+                    async move {
+                        mods::install(
+                            &download::client(),
+                            &paths,
+                            &instance,
+                            &id,
+                            &download::no_progress(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
+                    },
+                    move |result| Message::ModInstalled(project.clone(), result),
+                );
+            }
+            Message::ModInstalled(project, result) => {
+                if let Some(view) = self.mods_view() {
+                    view.installing.remove(&project);
+                }
+                match result {
+                    Ok(titles) if titles.is_empty() => {
+                        self.notice = Some((false, "Already installed".into()))
+                    }
+                    Ok(titles) => {
+                        self.notice = Some((false, format!("Installed {}", titles.join(", "))))
+                    }
+                    Err(e) => self.error(e),
+                }
+                self.refresh_mods();
+            }
+            Message::ToggleMod(file, enabled) => {
+                if let Some(instance) = self.mods_instance()
+                    && let Err(e) = mods::set_enabled(&self.paths, &instance, &file, enabled)
+                {
+                    self.error(e.to_string());
+                }
+                self.refresh_mods();
+            }
+            Message::RemoveMod(file) => {
+                if let Some(instance) = self.mods_instance()
+                    && let Err(e) = mods::remove(&self.paths, &instance, &file)
+                {
+                    self.error(e.to_string());
+                }
+                self.refresh_mods();
+            }
+            Message::AddModFiles => {
+                return Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Add mods")
+                        .add_filter("Mod jar", &["jar"])
+                        .pick_files(),
+                    |files| {
+                        Message::ModFilesPicked(
+                            files
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|f| f.path().to_path_buf())
+                                .collect(),
+                        )
+                    },
+                );
+            }
+            Message::ModFilesPicked(files) => {
+                for file in files {
+                    self.add_mod_file(&file);
+                }
+            }
+            Message::FileDropped(path) => self.add_mod_file(&path),
+
             #[cfg(debug_assertions)]
             Message::Snapshot(step) => return snapshot::update(self, step),
 
@@ -568,442 +1131,10 @@ impl App {
         }
         Task::none()
     }
-
-    fn view(&self) -> Element<'_, Message> {
-        let main = match &self.screen {
-            Screen::Home => self.view_home(),
-            Screen::NewInstance(form) => self.view_new_instance(form),
-            Screen::EditInstance(form) => self.view_edit(form),
-            Screen::Accounts { name } => self.view_accounts(name),
-        };
-        let mut content = column![].spacing(16).padding(24).height(Length::Fill);
-        if let Some((is_error, msg)) = &self.notice {
-            content = content.push(
-                container(
-                    row![
-                        text(msg).width(Length::Fill),
-                        button(text("✕").size(12))
-                            .style(button::text)
-                            .on_press(Message::DismissNotice),
-                    ]
-                    .align_y(Alignment::Center),
-                )
-                .padding([8, 14])
-                .style(theme::notice(*is_error)),
-            );
-        }
-        content = content.push(main);
-        row![self.view_sidebar(), content].into()
-    }
-
-    fn view_sidebar(&self) -> Element<'_, Message> {
-        let mut list = column![].spacing(4);
-        for instance in &self.instances {
-            let selected = self.selected.as_ref() == Some(&instance.name)
-                && matches!(self.screen, Screen::Home);
-            let status = if self.runs.contains_key(&instance.name) {
-                "● "
-            } else {
-                ""
-            };
-            list = list.push(
-                button(column![
-                    text(format!("{status}{}", instance.name)).size(15),
-                    text(&instance.version).size(12).color(theme::MUTED),
-                ])
-                .width(Length::Fill)
-                .padding([8, 12])
-                .style(theme::list_item(selected))
-                .on_press(Message::Select(instance.name.clone())),
-            );
-        }
-        if self.instances.is_empty() {
-            list = list.push(text("No instances yet").size(13).color(theme::MUTED));
-        }
-
-        let names: Vec<String> = self
-            .accounts
-            .accounts
-            .iter()
-            .map(|a| a.name.clone())
-            .collect();
-        let account = column![
-            text("Playing as").size(12).color(theme::MUTED),
-            row![
-                pick_list(
-                    names,
-                    self.accounts.default.clone(),
-                    Message::SetDefaultAccount
-                )
-                .placeholder("No account")
-                .width(Length::Fill),
-                button(text("⚙").size(14))
-                    .style(theme::secondary)
-                    .padding([6, 10])
-                    .on_press(Message::ShowAccounts),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(6);
-
-        container(
-            column![
-                row![
-                    iced::widget::image(self.logo.clone()).width(30).height(30),
-                    text("netherNode").size(22).color(theme::ACCENT),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-                text("Offline Minecraft launcher")
-                    .size(12)
-                    .color(theme::MUTED),
-                rule::horizontal(1),
-                scrollable(list).height(Length::Fill),
-                button(
-                    text("+  New instance")
-                        .width(Length::Fill)
-                        .align_x(Alignment::Center)
-                )
-                .width(Length::Fill)
-                .padding(10)
-                .style(theme::secondary)
-                .on_press(Message::ShowNewInstance),
-                account,
-            ]
-            .spacing(12)
-            .padding(16),
-        )
-        .width(240)
-        .height(Length::Fill)
-        .style(theme::sidebar)
-        .into()
-    }
-
-    fn view_home(&self) -> Element<'_, Message> {
-        let Some(instance) = self
-            .selected
-            .as_ref()
-            .and_then(|s| self.instances.iter().find(|i| &i.name == s))
-        else {
-            return container(
-                column![
-                    text("No instance selected").size(20),
-                    text("Create an instance to pick a Minecraft version and play.")
-                        .color(theme::MUTED),
-                    button(text("+  New instance"))
-                        .padding([10, 18])
-                        .style(theme::play)
-                        .on_press(Message::ShowNewInstance),
-                ]
-                .spacing(12)
-                .align_x(Alignment::Center),
-            )
-            .center(Length::Fill)
-            .into();
-        };
-
-        let run = self.runs.get(&instance.name);
-        let memory = match (run.and_then(|r| r.heap.clone()), instance.max_memory_mb) {
-            (Some(heap), _) => format!("Memory {heap}"),
-            (None, Some(mb)) => format!("Memory up to {mb} MB"),
-            (None, None) => "Memory: automatic".into(),
-        };
-        let action = match run {
-            Some(r) if r.stop.is_none() => button(text("Stopping…").size(18))
-                .padding([12, 36])
-                .style(theme::stop),
-            Some(_) => button(text("■  Stop").size(18))
-                .padding([12, 36])
-                .style(theme::stop)
-                .on_press(Message::Stop(instance.name.clone())),
-            None => button(text("▶  Play").size(18))
-                .padding([12, 40])
-                .style(theme::play)
-                .on_press_maybe(
-                    (!self.accounts.accounts.is_empty())
-                        .then(|| Message::Play(instance.name.clone())),
-                ),
-        };
-        let deleting = self.confirm_delete.as_ref() == Some(&instance.name);
-        let header = container(
-            row![
-                column![
-                    text(&instance.name).size(26),
-                    text(format!("Minecraft {}  ·  {memory}", instance.version))
-                        .color(theme::MUTED),
-                ]
-                .spacing(4)
-                .width(Length::Fill),
-                button(text("Edit"))
-                    .style(theme::secondary)
-                    .padding([8, 14])
-                    .on_press_maybe(
-                        run.is_none()
-                            .then(|| Message::ShowEdit(instance.name.clone()))
-                    ),
-                button(text("Folder"))
-                    .style(theme::secondary)
-                    .padding([8, 14])
-                    .on_press(Message::OpenFolder(instance.game_dir(&self.paths))),
-                button(text(if deleting { "Really delete?" } else { "Delete" }))
-                    .style(theme::danger_outline)
-                    .padding([8, 14])
-                    .on_press_maybe(
-                        run.is_none()
-                            .then(|| Message::Delete(instance.name.clone()))
-                    ),
-                action,
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-        )
-        .padding(20)
-        .style(theme::card);
-
-        let mut body = column![header].spacing(16);
-        if let Some(crash) = self.crashes.get(&instance.name) {
-            body = body.push(view_crash(&instance.name, crash));
-        }
-        if let Some((stage, done, total)) = run.and_then(|r| r.stage.as_ref()) {
-            body = body.push(
-                column![
-                    text(format!("{stage}: {done} / {total}"))
-                        .size(13)
-                        .color(theme::MUTED),
-                    progress_bar(0.0..=(*total).max(1) as f32, *done as f32).girth(8),
-                ]
-                .spacing(6),
-            );
-        }
-
-        let lines = self.logs.get(&instance.name).filter(|l| !l.is_empty());
-        if lines.is_none() {
-            body = body.push(
-                container(
-                    text("Game output will appear here when you press Play.").color(theme::MUTED),
-                )
-                .center(Length::Fill)
-                .style(theme::console),
-            );
-            return body.into();
-        }
-        let shown = lines.map_or(0, |l| l.len().min(LOG_VISIBLE));
-        let console = column(
-            lines
-                .into_iter()
-                .flat_map(|l| l.iter().skip(l.len() - shown))
-                .map(|line| text(line).size(12).font(Font::MONOSPACE).into()),
-        )
-        .spacing(2);
-        body = body.push(
-            container(
-                scrollable(container(console).padding(12).width(Length::Fill))
-                    .anchor_bottom()
-                    .height(Length::Fill),
-            )
-            .style(theme::console)
-            .height(Length::Fill),
-        );
-        body.into()
-    }
-
-    fn view_new_instance<'a>(&'a self, form: &'a NewInstanceForm) -> Element<'a, Message> {
-        let versions: Element<'a, Message> = if self.versions.is_some() {
-            combo_box(
-                &form.choices,
-                "Search versions…",
-                form.version.as_ref(),
-                Message::NewVersion,
-            )
-            .input_style(theme::input)
-            .padding(10)
-            .into()
-        } else {
-            text("Loading versions…").color(theme::MUTED).into()
-        };
-        let can_create = form.version.is_some();
-        let card = container(
-            column![
-                text("New instance").size(24),
-                field(
-                    "Name",
-                    text_input(form.version.as_deref().unwrap_or("My world"), &form.name)
-                        .on_input(Message::NewName)
-                        .on_submit_maybe(can_create.then_some(Message::CreateInstance))
-                        .style(theme::input)
-                        .padding(10)
-                ),
-                field("Minecraft version", versions),
-                checkbox(form.snapshots)
-                    .label("Show snapshots")
-                    .on_toggle(Message::NewSnapshots),
-                checkbox(form.low_end)
-                    .label(
-                        "Low-end graphics defaults (render distance 6, 60 FPS cap, fast graphics)"
-                    )
-                    .on_toggle(Message::NewLowEnd),
-                row![
-                    space::horizontal(),
-                    button(text("Cancel"))
-                        .style(theme::secondary)
-                        .padding([10, 18])
-                        .on_press(Message::ShowHome),
-                    button(text("Create"))
-                        .style(theme::play)
-                        .padding([10, 22])
-                        .on_press_maybe(can_create.then_some(Message::CreateInstance)),
-                ]
-                .spacing(10),
-            ]
-            .spacing(18),
-        )
-        .padding(24)
-        .max_width(560)
-        .style(theme::card);
-        container(card).center_x(Length::Fill).into()
-    }
-
-    fn view_edit<'a>(&'a self, form: &'a EditForm) -> Element<'a, Message> {
-        let memory_note = format!(
-            "This computer has {} MB of RAM. Automatic uses about a quarter of it ({} MB) and shrinks if less is free.",
-            self.memory.total_mb,
-            self.memory.recommended_max_heap_mb()
-        );
-        let mut memory = column![
-            checkbox(form.auto_memory)
-                .label("Automatic memory")
-                .on_toggle(Message::EditAutoMemory),
-            text(memory_note).size(12).color(theme::MUTED),
-        ]
-        .spacing(8);
-        if !form.auto_memory {
-            memory = memory.push(field(
-                "Maximum memory (MB)",
-                text_input("2048", &form.max_memory)
-                    .on_input(Message::EditMaxMemory)
-                    .style(theme::input)
-                    .padding(10),
-            ));
-        }
-        let card = container(
-            column![
-                text(format!("Edit {}", form.original)).size(24),
-                memory,
-                field(
-                    "Java executable (leave empty to pick automatically)",
-                    text_input("Automatic", &form.java_path)
-                        .on_input(Message::EditJava)
-                        .style(theme::input)
-                        .padding(10),
-                ),
-                field(
-                    "Extra JVM arguments",
-                    text_input("e.g. -XX:+UseZGC", &form.jvm_args)
-                        .on_input(Message::EditJvmArgs)
-                        .style(theme::input)
-                        .padding(10),
-                ),
-                row![
-                    space::horizontal(),
-                    button(text("Cancel"))
-                        .style(theme::secondary)
-                        .padding([10, 18])
-                        .on_press(Message::ShowHome),
-                    button(text("Save"))
-                        .style(theme::play)
-                        .padding([10, 22])
-                        .on_press(Message::SaveEdit),
-                ]
-                .spacing(10),
-            ]
-            .spacing(18),
-        )
-        .padding(24)
-        .max_width(560)
-        .style(theme::card);
-        container(card).center_x(Length::Fill).into()
-    }
-
-    fn view_accounts<'a>(&'a self, name: &'a str) -> Element<'a, Message> {
-        let mut list = column![].spacing(8);
-        for account in &self.accounts.accounts {
-            let is_default = self.accounts.default.as_ref() == Some(&account.name);
-            list = list.push(
-                container(
-                    row![
-                        column![
-                            text(&account.name).size(16),
-                            text(&account.uuid)
-                                .size(11)
-                                .font(Font::MONOSPACE)
-                                .color(theme::MUTED),
-                        ]
-                        .spacing(2)
-                        .width(Length::Fill),
-                        if is_default {
-                            Element::from(text("Default").size(13).color(theme::SUCCESS))
-                        } else {
-                            button(text("Make default"))
-                                .style(theme::secondary)
-                                .padding([6, 12])
-                                .on_press(Message::SetDefaultAccount(account.name.clone()))
-                                .into()
-                        },
-                        button(text("Remove"))
-                            .style(theme::danger_outline)
-                            .padding([6, 12])
-                            .on_press(Message::RemoveAccount(account.name.clone())),
-                    ]
-                    .spacing(10)
-                    .align_y(Alignment::Center),
-                )
-                .padding(12)
-                .style(theme::console),
-            );
-        }
-        let can_add = !name.trim().is_empty();
-        let card = container(
-            column![
-                text("Accounts").size(24),
-                text("Offline accounts only: no login, no internet check. Your name and UUID are what offline servers and LAN worlds see.")
-                    .size(13)
-                    .color(theme::MUTED),
-                list,
-                row![
-                    text_input("Username (3–16 letters, digits or _)", name)
-                        .on_input(Message::AccountName)
-                        .on_submit_maybe(can_add.then_some(Message::AddAccount))
-                        .style(theme::input)
-                        .padding(10),
-                    button(text("Add")).style(theme::play).padding([10, 20]).on_press_maybe(can_add.then_some(Message::AddAccount)),
-                ]
-                .spacing(10),
-                row![
-                    space::horizontal(),
-                    button(text("Done"))
-                        .style(theme::secondary)
-                        .padding([10, 18])
-                        .on_press_maybe((!self.accounts.accounts.is_empty()).then_some(Message::ShowHome)),
-                ],
-            ]
-            .spacing(18),
-        )
-        .padding(24)
-        .max_width(620)
-        .style(theme::card);
-        container(card).center_x(Length::Fill).into()
-    }
 }
 
-fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(label).size(13).color(theme::MUTED), input.into()]
-        .spacing(6)
-        .into()
-}
-
-/// Open a file or folder with the system's default app.
-fn open_path(path: &Path) {
+/// Open a file, folder or URL with the system's default app.
+fn open_path(target: &std::ffi::OsStr) {
     let opener = if cfg!(windows) {
         "explorer"
     } else if cfg!(target_os = "macos") {
@@ -1011,71 +1142,5 @@ fn open_path(path: &Path) {
     } else {
         "xdg-open"
     };
-    let _ = std::process::Command::new(opener).arg(path).spawn();
-}
-
-/// Plain-text crash summary for pasting into a bug report or chat.
-fn crash_text(instance: &str, crash: &CrashInfo) -> String {
-    let mut out = format!(
-        "netherNode {}: {instance}\n{}\n",
-        env!("CARGO_PKG_VERSION"),
-        crash.title
-    );
-    for (label, value) in [
-        ("Cause", crash.cause.clone()),
-        ("Exit code", crash.exit_code.map(|c| c.to_string())),
-        (
-            "Report",
-            crash.report.as_ref().map(|p| p.display().to_string()),
-        ),
-        ("Hint", crash.hint.clone()),
-    ] {
-        if let Some(value) = value {
-            out.push_str(&format!("{label}: {value}\n"));
-        }
-    }
-    out
-}
-
-fn view_crash<'a>(name: &str, crash: &'a CrashInfo) -> Element<'a, Message> {
-    let mut details = column![text(&crash.title).size(17).color(theme::DANGER)].spacing(8);
-    if let Some(cause) = &crash.cause {
-        details = details.push(
-            text(cause)
-                .size(12)
-                .font(Font::MONOSPACE)
-                .color(theme::MUTED),
-        );
-    }
-    if let Some(hint) = &crash.hint {
-        details = details.push(text(hint).size(14));
-    }
-    let mut actions = row![].spacing(8);
-    if let Some(report) = &crash.report {
-        actions = actions.push(
-            button(text("Open crash report"))
-                .style(theme::secondary)
-                .padding([6, 12])
-                .on_press(Message::OpenFile(report.clone())),
-        );
-    }
-    actions = actions
-        .push(
-            button(text("Copy details"))
-                .style(theme::secondary)
-                .padding([6, 12])
-                .on_press(Message::CopyCrash(name.to_string())),
-        )
-        .push(space::horizontal())
-        .push(
-            button(text("Dismiss"))
-                .style(button::text)
-                .padding([6, 12])
-                .on_press(Message::DismissCrash(name.to_string())),
-        );
-    container(details.push(actions))
-        .padding(16)
-        .width(Length::Fill)
-        .style(theme::notice(true))
-        .into()
+    let _ = std::process::Command::new(opener).arg(target).spawn();
 }

@@ -110,6 +110,9 @@ data/
 
 ## Phase 4: Mod loaders
 
+**Done:** Fabric, Quilt, Forge (including pre-1.13 "versionInfo" installers), NeoForge, and OptiFine from a user-supplied jar (its author forbids automated downloads). Forge/NeoForge installer processors are run by netherNode itself. The official installer aborts on distros whose Java uses zlib-ng (Fedora 40+), where compression output differs byte-for-byte; we only warn on checksum mismatches. Verified launching: Fabric 1.21.1 (+Sodium, Iris), Quilt 1.21.1, Forge 1.20.1, Forge 1.12.2, NeoForge 1.21.1. The OptiFine path is untested; it needs a real OptiFine jar.
+
+
 Every loader produces a version JSON that `inheritsFrom` the vanilla one. Write a **merge function**: take the parent and append child libraries (child wins on the same `group:artifact`), child `mainClass`, concatenate `arguments`.
 
 - **Fabric:** GET `https://meta.fabricmc.net/v2/versions/loader/<mc>/<loader>/profile/json`. Libraries use `name` + `url` (Maven repo), not `downloads`, so resolve them yourself.
@@ -120,6 +123,9 @@ Every loader produces a version JSON that `inheritsFrom` the vanilla one. Write 
 ---
 
 ## Phase 5: GUI
+
+**Redesign (done):** obsidian + violet glass theme over a live nether portal drawn by a wgpu shader. The shader uses the obsidian and portal textures read at runtime from the user's downloaded game jar (never shipped by us), with procedural stand-ins before the first download. It runs at 30 fps (about 8% of one core), pauses while a game runs, can be turned off, and becomes a static gradient on the CPU renderer. TLauncher/UltimMC-style layout: instance cards with block-texture icons (double-click to play), details + console, a bottom play bar, a visual loader picker, and a Mods screen.
+
 
 **Done (first version):** instance sidebar, Play/Stop, live game log, download progress, new-instance form (searchable versions, snapshots, low-end preset), instance settings (memory, Java, JVM args), accounts screen, open folder, two-click delete. Closing the window stops running games. Debug builds can screenshot every screen with `NETHERNODE_SNAPSHOT=<dir>`.
 **Crash detection (done):** after a failed run, netherNode reads the new Minecraft crash report, a JVM `hs_err_pid*.log`, or the last 200 output lines. It shows the cause and a fix for known problems: out of memory, a bad heap setting, Java too old, missing xrandr, OpenGL/driver issues, graphics-driver JVM crashes and broken native libraries. A custom Java that is too old is rejected before launch. The GUI shows a crash card (open report, copy details); the CLI prints the same information.
@@ -135,6 +141,9 @@ Every loader produces a version JSON that `inheritsFrom` the vanilla one. Write 
 ---
 
 ## Phase 6: Mod and modpack content
+
+**Done:** Modrinth search filtered by loader and game version; install with required dependencies, preferring release builds; installed list with enable/disable/remove; add jars via file picker or by dropping them onto the window. **To do:** updates, .mrpack modpacks, CurseForge (needs an API key).
+
 
 - **Modrinth API** (`api.modrinth.com/v2`): search, versions by game version + loader, dependencies, and the `.mrpack` modpack format (`modrinth.index.json` + overrides). It is open and easy, so start here.
 - **CurseForge:** needs an API key (apply for one at console.curseforge.com).

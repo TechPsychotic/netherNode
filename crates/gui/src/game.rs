@@ -101,3 +101,37 @@ pub fn launch(
 
     stream::select(rx, stream::once(work).filter_map(|()| async { None }))
 }
+
+/// Progress of a background job such as installing a mod loader.
+#[derive(Debug, Clone)]
+pub enum JobEvent {
+    Stage {
+        name: String,
+        total: u64,
+    },
+    Advance,
+    /// Finished: a short success message, or the error.
+    Done(Result<String, String>),
+}
+
+/// Run `work` (given a progress callback) and report it as [`JobEvent`]s.
+pub fn job<F, Fut>(work: F) -> impl Stream<Item = JobEvent>
+where
+    F: FnOnce(ProgressFn) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
+{
+    let (tx, rx) = mpsc::unbounded();
+    let progress_tx = tx.clone();
+    let progress: ProgressFn = Arc::new(move |event| {
+        let event = match event {
+            Progress::Stage { name, total } => JobEvent::Stage { name, total },
+            Progress::Advance => JobEvent::Advance,
+        };
+        let _ = progress_tx.unbounded_send(event);
+    });
+    let run = async move {
+        let result = work(progress).await;
+        let _ = tx.unbounded_send(JobEvent::Done(result));
+    };
+    stream::select(rx, stream::once(run).filter_map(|()| async { None }))
+}
