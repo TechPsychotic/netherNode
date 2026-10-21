@@ -10,9 +10,9 @@ use nethernode_core::instance::Instance;
 use nethernode_core::launch::{self, QuickPlay};
 use nethernode_core::loader::{self, LoaderKind};
 use nethernode_core::memory::SystemMemory;
-use nethernode_core::mods;
 use nethernode_core::paths::Paths;
 use nethernode_core::version;
+use nethernode_core::{modpack, mods};
 
 #[derive(Parser)]
 #[command(name = "nethernode", version, about = "Offline Minecraft launcher")]
@@ -50,6 +50,9 @@ enum Command {
     /// Mods for an instance (from Modrinth or local files)
     #[command(subcommand)]
     Mods(ModsCmd),
+    /// Modrinth modpacks: import .mrpack files or install from Modrinth
+    #[command(subcommand)]
+    Modpack(ModpackCmd),
     /// Download (if needed) and start an instance
     Launch {
         instance: String,
@@ -167,6 +170,24 @@ enum ModsCmd {
         instance: String,
         file: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ModpackCmd {
+    /// Create an instance from a .mrpack file
+    Import {
+        file: PathBuf,
+        /// Instance name (default: the pack's name)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Search Modrinth modpacks
+    Search {
+        #[arg(default_value = "")]
+        query: String,
+    },
+    /// Install a Modrinth modpack (slug or id) as a new instance
+    Install { project: String },
 }
 
 fn parse_loader(name: &str) -> Result<LoaderKind> {
@@ -414,6 +435,46 @@ async fn main() -> Result<()> {
                 }
                 ModsCmd::Remove { instance, file } => {
                     mods::remove(&paths, &Instance::load(&paths, &instance)?, &file)?;
+                }
+            }
+        }
+
+        Command::Modpack(cmd) => {
+            let http = download::client();
+            let report = |i: &Instance| {
+                let loader = i.loader.as_ref().map_or("vanilla".to_string(), |l| {
+                    format!("{} {}", l.kind, l.version)
+                });
+                println!(
+                    "created '{}': Minecraft {}, {loader}",
+                    i.name,
+                    i.minecraft_version()
+                );
+            };
+            match cmd {
+                ModpackCmd::Import { file, name } => {
+                    let i = modpack::import(
+                        &http,
+                        &paths,
+                        &file,
+                        name.as_deref(),
+                        None,
+                        &progress_bars(),
+                    )
+                    .await?;
+                    report(&i);
+                }
+                ModpackCmd::Search { query } => {
+                    for hit in modpack::search(&http, &query, 0).await?.hits {
+                        println!(
+                            "{:<32} {:>11} downloads  {}",
+                            hit.slug, hit.downloads, hit.description
+                        );
+                    }
+                }
+                ModpackCmd::Install { project } => {
+                    let i = modpack::install(&http, &paths, &project, &progress_bars()).await?;
+                    report(&i);
                 }
             }
         }

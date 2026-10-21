@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::channel::oneshot;
-use iced::widget::combo_box;
 use iced::{Subscription, Task, window};
 use nethernode_core::account::Accounts;
 use nethernode_core::crash::CrashInfo;
@@ -23,6 +22,7 @@ use nethernode_core::download;
 use nethernode_core::instance::Instance;
 use nethernode_core::loader::{self, LoaderKind, LoaderVersion};
 use nethernode_core::memory::SystemMemory;
+use nethernode_core::modpack;
 use nethernode_core::mods::{self, InstalledMod, SearchHit};
 use nethernode_core::paths::Paths;
 use nethernode_core::version::{self, ManifestEntry};
@@ -110,6 +110,10 @@ pub struct App {
     /// Shaders need the GPU renderer; the CPU one (low-memory mode) gets a static backdrop.
     gpu: bool,
     hovered: Option<String>,
+    /// The version list is being re-fetched from Mojang.
+    refreshing_versions: bool,
+    /// Modpack installs in progress, by Modrinth project id or file path.
+    pack_jobs: HashMap<String, Job>,
 }
 
 /// A launch in progress: downloading, then playing.
@@ -130,6 +134,7 @@ pub enum Screen {
     EditInstance(EditForm),
     Accounts { name: String },
     Mods(ModsView),
+    Modpacks(PacksView),
 }
 
 /// Something loaded in the background.
@@ -150,10 +155,58 @@ pub struct LoaderPick {
 pub struct NewInstanceForm {
     name: String,
     version: Option<String>,
-    snapshots: bool,
+    filter: VersionFilter,
     low_end: bool,
-    choices: combo_box::State<String>,
     loader: LoaderPick,
+}
+
+/// Which Minecraft versions the dropdown lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionFilter {
+    Releases,
+    Snapshots,
+    /// Everything, including the old alphas and betas.
+    All,
+}
+
+/// One entry of the version dropdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionChoice {
+    pub id: String,
+    pub kind: String,
+    /// Already downloaded, so it starts without a download.
+    pub downloaded: bool,
+}
+
+impl std::fmt::Display for VersionChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.kind.as_str() {
+            "release" => "",
+            "snapshot" => "  · snapshot",
+            "old_beta" => "  · beta",
+            "old_alpha" => "  · alpha",
+            _ => "",
+        };
+        let downloaded = if self.downloaded {
+            "  ✓ downloaded"
+        } else {
+            ""
+        };
+        write!(f, "{}{kind}{downloaded}", self.id)
+    }
+}
+
+/// Where a modpack comes from.
+#[derive(Debug, Clone)]
+enum PackSource {
+    Modrinth(String),
+    File(PathBuf),
+}
+
+pub struct PacksView {
+    query: String,
+    results: Option<Load<Vec<SearchHit>>>,
+    total: u64,
 }
 
 pub struct EditForm {
@@ -204,7 +257,8 @@ pub enum Message {
     ShowNewInstance,
     NewName(String),
     NewVersion(String),
-    NewSnapshots(bool),
+    NewFilter(VersionFilter),
+    RefreshVersions,
     NewLowEnd(bool),
     CreateInstance,
     ShowEdit(String),
@@ -236,10 +290,32 @@ pub enum Message {
     AddModFiles,
     ModFilesPicked(Vec<PathBuf>),
     FileDropped(PathBuf),
+    ShowModpacks,
+    PacksQuery(String),
+    PacksSearch,
+    PacksMore,
+    PacksResults(u32, Result<mods::SearchResults, String>),
+    InstallPack(String),
+    ImportPack,
+    PackPicked(Option<PathBuf>),
+    PackJob(String, game::JobEvent),
     CloseRequested(window::Id),
     /// Debug builds only: screenshot each screen to `$NETHERNODE_SNAPSHOT` (see snapshot.rs).
     #[cfg(debug_assertions)]
     Snapshot(snapshot::Step),
+}
+
+/// Fetch Mojang's current version list (falls back to the cached copy when offline).
+fn load_versions(paths: Paths) -> Task<Message> {
+    Task::perform(
+        async move {
+            version::manifest(&download::client(), &paths)
+                .await
+                .map(|m| m.versions)
+                .map_err(|e| e.to_string())
+        },
+        Message::VersionsLoaded,
+    )
 }
 
 fn load_textures(paths: Paths) -> Task<Message> {
@@ -257,6 +333,7 @@ fn load_textures(paths: Paths) -> Task<Message> {
 impl App {
     fn new() -> (Self, Task<Message>) {
         let paths = Paths::new(Paths::default_root());
+        let interrupted = Instance::clean_interrupted(&paths);
         let instances = Instance::list(&paths).unwrap_or_default();
         let accounts = Accounts::load(&paths).unwrap_or_default();
         let gpu = std::env::var("ICED_BACKEND").map_or(true, |b| !b.starts_with("tiny-skia"));
@@ -279,8 +356,19 @@ impl App {
             prefs: Prefs::load(&paths),
             gpu,
             hovered: None,
+            refreshing_versions: true,
+            pack_jobs: HashMap::new(),
             paths: paths.clone(),
         };
+        if !interrupted.is_empty() {
+            app.notice = Some((
+                false,
+                format!(
+                    "Removed unfinished install(s) from last time: {}. Install them again from Modpacks.",
+                    interrupted.join(", ")
+                ),
+            ));
+        }
         if app.accounts.accounts.is_empty() {
             app.screen = Screen::Accounts {
                 name: String::new(),
@@ -290,17 +378,7 @@ impl App {
                 "Welcome to netherNode! Add an offline account to get started.".into(),
             ));
         }
-        let manifest_paths = paths.clone();
-        let load_versions = Task::perform(
-            async move {
-                version::manifest(&download::client(), &manifest_paths)
-                    .await
-                    .map(|m| m.versions)
-                    .map_err(|e| e.to_string())
-            },
-            Message::VersionsLoaded,
-        );
-        let tasks = Task::batch([load_versions, load_textures(paths)]);
+        let tasks = Task::batch([load_versions(paths.clone()), load_textures(paths)]);
         #[cfg(debug_assertions)]
         let tasks = Task::batch([tasks, snapshot::start()]);
         (app, tasks)
@@ -347,13 +425,78 @@ impl App {
         }
     }
 
-    fn version_choices(&self, snapshots: bool) -> Vec<String> {
+    /// Every version Mojang lists that matches `filter`, newest first, marking downloaded ones.
+    pub fn version_choices(&self, filter: VersionFilter) -> Vec<VersionChoice> {
         self.versions
             .iter()
             .flatten()
-            .filter(|v| v.kind == "release" || (snapshots && v.kind == "snapshot"))
-            .map(|v| v.id.clone())
+            .filter(|v| match filter {
+                VersionFilter::Releases => v.kind == "release",
+                VersionFilter::Snapshots => v.kind == "release" || v.kind == "snapshot",
+                VersionFilter::All => true,
+            })
+            .map(|v| VersionChoice {
+                id: v.id.clone(),
+                kind: v.kind.clone(),
+                downloaded: self.paths.version_jar(&v.id).exists(),
+            })
             .collect()
+    }
+
+    fn packs_view(&mut self) -> Option<&mut PacksView> {
+        match &mut self.screen {
+            Screen::Modpacks(view) => Some(view),
+            _ => None,
+        }
+    }
+
+    fn search_packs(&mut self, offset: u32) -> Task<Message> {
+        let Some(view) = self.packs_view() else {
+            return Task::none();
+        };
+        let query = view.query.clone();
+        if offset == 0 {
+            view.results = Some(Load::Loading);
+        }
+        Task::perform(
+            async move {
+                modpack::search(&download::client(), &query, offset)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |result| Message::PacksResults(offset, result),
+        )
+    }
+
+    /// Install or import a modpack as a background job; it becomes a new instance.
+    fn start_pack_job(&mut self, source: PackSource, label: String) -> Task<Message> {
+        let key = match &source {
+            PackSource::Modrinth(id) => id.clone(),
+            PackSource::File(path) => path.display().to_string(),
+        };
+        if self.pack_jobs.contains_key(&key) {
+            return Task::none();
+        }
+        self.notice = Some((
+            false,
+            format!("Installing {label}… it will appear in your instances when it's ready."),
+        ));
+        self.pack_jobs
+            .insert(key.clone(), Job { label, stage: None });
+        let paths = self.paths.clone();
+        let stream = game::job(move |progress| async move {
+            let http = download::client();
+            let result = match source {
+                PackSource::Modrinth(id) => modpack::install(&http, &paths, &id, &progress).await,
+                PackSource::File(path) => {
+                    modpack::import(&http, &paths, &path, None, None, &progress).await
+                }
+            };
+            result
+                .map(|instance| instance.name)
+                .map_err(|e| e.to_string())
+        });
+        Task::run(stream, move |event| Message::PackJob(key.clone(), event))
     }
 
     /// The Minecraft version the loader picker on the current screen applies to.
@@ -637,19 +780,30 @@ impl App {
                 }
             },
 
-            Message::VersionsLoaded(result) => match result {
-                Ok(versions) => {
-                    self.versions = Some(versions);
-                    if let Screen::NewInstance(form) = &self.screen {
-                        let choices = self.version_choices(form.snapshots);
-                        if let Screen::NewInstance(form) = &mut self.screen {
-                            form.version = form.version.take().or_else(|| choices.first().cloned());
-                            form.choices = combo_box::State::new(choices);
+            Message::VersionsLoaded(result) => {
+                self.refreshing_versions = false;
+                match result {
+                    Ok(versions) => {
+                        self.versions = Some(versions);
+                        // A form opened before the list arrived gets the newest release.
+                        let newest = self
+                            .version_choices(VersionFilter::Releases)
+                            .first()
+                            .map(|c| c.id.clone());
+                        if let Screen::NewInstance(form) = &mut self.screen
+                            && form.version.is_none()
+                        {
+                            form.version = newest;
+                            return self.load_loader_versions();
                         }
                     }
+                    Err(e) => self.error(format!("Couldn't load the version list: {e}")),
                 }
-                Err(e) => self.error(format!("Couldn't load the version list: {e}")),
-            },
+            }
+            Message::RefreshVersions => {
+                self.refreshing_versions = true;
+                return load_versions(self.paths.clone());
+            }
 
             Message::TexturesLoaded(textures) => {
                 if textures.is_some() {
@@ -696,13 +850,15 @@ impl App {
             Message::ShowHome => self.screen = Screen::Home,
 
             Message::ShowNewInstance => {
-                let choices = self.version_choices(false);
+                let newest = self
+                    .version_choices(VersionFilter::Releases)
+                    .first()
+                    .map(|c| c.id.clone());
                 self.screen = Screen::NewInstance(NewInstanceForm {
                     name: String::new(),
-                    version: choices.first().cloned(),
-                    snapshots: false,
+                    version: newest,
+                    filter: VersionFilter::Releases,
                     low_end: self.memory.is_low(),
-                    choices: combo_box::State::new(choices),
                     loader: LoaderPick {
                         kind: None,
                         versions: None,
@@ -710,6 +866,9 @@ impl App {
                         optifine_jar: None,
                     },
                 });
+                // Always offer Mojang's current list, not just what was cached at startup.
+                self.refreshing_versions = true;
+                return load_versions(self.paths.clone());
             }
             Message::NewName(name) => {
                 if let Screen::NewInstance(f) = &mut self.screen {
@@ -724,11 +883,9 @@ impl App {
                 // Loader versions depend on the Minecraft version.
                 return self.load_loader_versions();
             }
-            Message::NewSnapshots(on) => {
-                let choices = self.version_choices(on);
+            Message::NewFilter(filter) => {
                 if let Screen::NewInstance(f) = &mut self.screen {
-                    f.snapshots = on;
-                    f.choices = combo_box::State::new(choices);
+                    f.filter = filter;
                 }
             }
             Message::NewLowEnd(on) => {
@@ -1111,7 +1268,119 @@ impl App {
                     self.add_mod_file(&file);
                 }
             }
-            Message::FileDropped(path) => self.add_mod_file(&path),
+            Message::FileDropped(path) => {
+                // .mrpack anywhere imports a modpack; .jar on the Mods screen adds a mod.
+                if path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("mrpack"))
+                {
+                    let label = path
+                        .file_name()
+                        .map_or("modpack".into(), |n| n.to_string_lossy().into_owned());
+                    return self.start_pack_job(PackSource::File(path), label);
+                }
+                self.add_mod_file(&path);
+            }
+
+            Message::ShowModpacks => {
+                self.screen = Screen::Modpacks(PacksView {
+                    query: String::new(),
+                    results: None,
+                    total: 0,
+                });
+                return self.search_packs(0);
+            }
+            Message::PacksQuery(q) => {
+                if let Some(view) = self.packs_view() {
+                    view.query = q;
+                }
+            }
+            Message::PacksSearch => return self.search_packs(0),
+            Message::PacksMore => {
+                let offset = match self.packs_view().map(|v| &v.results) {
+                    Some(Some(Load::Ready(hits))) => hits.len() as u32,
+                    _ => return Task::none(),
+                };
+                return self.search_packs(offset);
+            }
+            Message::PacksResults(offset, result) => {
+                if let Some(view) = self.packs_view() {
+                    match result {
+                        Ok(found) => {
+                            view.total = found.total_hits;
+                            match &mut view.results {
+                                Some(Load::Ready(hits)) if offset > 0 => hits.extend(found.hits),
+                                _ => view.results = Some(Load::Ready(found.hits)),
+                            }
+                        }
+                        Err(e) => view.results = Some(Load::Failed(e)),
+                    }
+                }
+            }
+            Message::InstallPack(project) => {
+                let title = match self.packs_view().map(|v| &v.results) {
+                    Some(Some(Load::Ready(hits))) => hits
+                        .iter()
+                        .find(|h| h.project_id == project)
+                        .map(|h| h.title.clone()),
+                    _ => None,
+                };
+                return self.start_pack_job(
+                    PackSource::Modrinth(project),
+                    title.unwrap_or_else(|| "modpack".into()),
+                );
+            }
+            Message::ImportPack => {
+                return Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Import a Modrinth modpack")
+                        .add_filter("Modrinth modpack", &["mrpack"])
+                        .pick_file(),
+                    |file| Message::PackPicked(file.map(|f| f.path().to_path_buf())),
+                );
+            }
+            Message::PackPicked(path) => {
+                if let Some(path) = path {
+                    return self.update(Message::FileDropped(path));
+                }
+            }
+            Message::PackJob(key, event) => match event {
+                game::JobEvent::Stage { name: stage, total } => {
+                    if let Some(job) = self.pack_jobs.get_mut(&key) {
+                        job.stage = Some((stage, 0, total));
+                    }
+                }
+                game::JobEvent::Advance => {
+                    if let Some((_, done, _)) =
+                        self.pack_jobs.get_mut(&key).and_then(|j| j.stage.as_mut())
+                    {
+                        *done += 1;
+                    }
+                }
+                game::JobEvent::Done(result) => {
+                    let label = self
+                        .pack_jobs
+                        .remove(&key)
+                        .map(|j| j.label)
+                        .unwrap_or_default();
+                    self.reload_instances();
+                    match result {
+                        Ok(name) => {
+                            self.notice = Some((
+                                false,
+                                format!(
+                                    "Installed {label} as '{name}'. Press Play when you're ready!"
+                                ),
+                            ));
+                            self.selected = Some(name);
+                        }
+                        Err(e) => self.error(format!("Couldn't install {label}: {e}")),
+                    }
+                    if self.textures.is_none() {
+                        return load_textures(self.paths.clone());
+                    }
+                }
+            },
 
             #[cfg(debug_assertions)]
             Message::Snapshot(step) => return snapshot::update(self, step),

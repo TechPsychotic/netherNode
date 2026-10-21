@@ -3,8 +3,8 @@
 
 use iced::widget::image::FilterMethod;
 use iced::widget::{
-    button, checkbox, column, combo_box, container, image, mouse_area, pick_list, progress_bar,
-    row, scrollable, shader, space, stack, text, text_input,
+    button, checkbox, column, container, image, mouse_area, pick_list, progress_bar, row,
+    scrollable, shader, space, stack, text, text_input,
 };
 use iced::{Alignment, Color, Element, Font, Length};
 use nethernode_core::crash::CrashInfo;
@@ -13,7 +13,10 @@ use nethernode_core::loader::LoaderKind;
 
 use crate::background::Portal;
 use crate::theme;
-use crate::{App, EditForm, Load, LoaderPick, Message, ModsTab, ModsView, NewInstanceForm, Screen};
+use crate::{
+    App, EditForm, Load, LoaderPick, Message, ModsTab, ModsView, NewInstanceForm, PacksView,
+    Screen, VersionFilter,
+};
 
 /// Obsidian block size in the background, logical px. Content sits inside this frame.
 const BLOCK: f32 = 40.0;
@@ -82,6 +85,7 @@ impl App {
             Screen::EditInstance(form) => self.dialog(self.edit_form(form)),
             Screen::Accounts { name } => self.dialog(self.accounts_form(name)),
             Screen::Mods(view) => self.mods_screen(view),
+            Screen::Modpacks(view) => self.modpacks_screen(view),
         };
         let mut content = column![self.top_bar()].spacing(14);
         if let Some((is_error, msg)) = &self.notice {
@@ -140,6 +144,7 @@ impl App {
             right = right.push(small_button(label).on_press(Message::ToggleAnimation));
         }
         right = right
+            .push(small_button("Modpacks").on_press(Message::ShowModpacks))
             .push(small_button("Accounts").on_press(Message::ShowAccounts))
             .push(
                 small_button("Data folder").on_press(Message::OpenFolder(self.paths.root.clone())),
@@ -196,6 +201,39 @@ impl App {
 
     fn instances_panel(&self) -> Element<'_, Message> {
         let mut cards = row![].spacing(12);
+        // Installs in progress come first so they are visible without scrolling.
+        for job in self.pack_jobs.values() {
+            let (detail, done, total) = match &job.stage {
+                Some((stage, done, total)) => (stage.clone(), *done, *total),
+                None => ("Starting…".into(), 0, 1),
+            };
+            cards = cards.push(
+                container(
+                    column![
+                        text("Installing").size(11).color(theme::WARNING),
+                        text(&job.label)
+                            .size(14)
+                            .font(BOLD)
+                            .width(Length::Fill)
+                            .center(),
+                        text(detail)
+                            .size(11)
+                            .color(theme::MUTED)
+                            .width(Length::Fill)
+                            .center(),
+                        progress_bar(0.0..=total.max(1) as f32, done as f32)
+                            .girth(6)
+                            .style(theme::progress),
+                    ]
+                    .spacing(8)
+                    .align_x(Alignment::Center),
+                )
+                .width(148)
+                .height(168)
+                .padding(12)
+                .style(|_| theme::card(false, true)),
+            );
+        }
         for instance in &self.instances {
             let selected = self.selected.as_ref() == Some(&instance.name);
             let hovered = self.hovered.as_ref() == Some(&instance.name);
@@ -316,28 +354,33 @@ impl App {
             (None, None) => "Memory: automatic".into(),
         };
         let deleting = self.confirm_delete.as_ref() == Some(&name);
-        let header = row![
-            self.instance_icon(instance, 64.0),
-            column![
-                text(&instance.name).size(24).font(BOLD),
-                row![
-                    chip(
-                        format!("Minecraft {}", instance.minecraft_version()),
-                        theme::VIOLET_BRIGHT
-                    ),
-                    chip(
-                        loader_label(instance),
-                        loader_color(instance.loader.as_ref().map(|l| l.kind))
-                    ),
+        let header =
+            row![
+                self.instance_icon(instance, 64.0),
+                column![
+                    text(&instance.name).size(24).font(BOLD),
+                    row![
+                        chip(
+                            format!("Minecraft {}", instance.minecraft_version()),
+                            theme::VIOLET_BRIGHT
+                        ),
+                        chip(
+                            loader_label(instance),
+                            loader_color(instance.loader.as_ref().map(|l| l.kind))
+                        ),
+                    ]
+                    .extend(instance.modpack.as_ref().map(|p| chip(
+                        format!("Modpack: {} {}", p.name, p.version),
+                        theme::MAGENTA
+                    )),)
+                    .spacing(6),
+                    text(memory).size(12).color(theme::MUTED),
                 ]
-                .spacing(6),
-                text(memory).size(12).color(theme::MUTED),
+                .spacing(6)
+                .width(Length::Fill),
             ]
-            .spacing(6)
-            .width(Length::Fill),
-        ]
-        .spacing(16)
-        .align_y(Alignment::Center);
+            .spacing(16)
+            .align_y(Alignment::Center);
 
         let actions = row![
             small_button("Mods").on_press(Message::ShowMods(name.clone())),
@@ -655,19 +698,65 @@ impl App {
     }
 
     fn new_instance_form<'a>(&'a self, form: &'a NewInstanceForm) -> Element<'a, Message> {
-        let versions: Element<'a, Message> = if self.versions.is_some() {
-            combo_box(
-                &form.choices,
-                "Search versions…",
-                form.version.as_ref(),
-                Message::NewVersion,
+        // Mojang's full list (refreshed when this form opens), not just downloaded versions.
+        let choices = self.version_choices(form.filter);
+        let selected = form
+            .version
+            .as_ref()
+            .and_then(|v| choices.iter().find(|c| &c.id == v).cloned());
+        let filters = [
+            (VersionFilter::Releases, "Releases"),
+            (VersionFilter::Snapshots, "+ Snapshots"),
+            (VersionFilter::All, "All (incl. alpha/beta)"),
+        ]
+        .into_iter()
+        .map(|(filter, label)| {
+            button(text(label).size(13))
+                .padding([6, 12])
+                .style(theme::segment(form.filter == filter))
+                .on_press(Message::NewFilter(filter))
+                .into()
+        });
+        let status = if self.refreshing_versions {
+            "Checking Mojang for new versions…".to_string()
+        } else {
+            let downloaded = choices.iter().filter(|c| c.downloaded).count();
+            format!(
+                "{} versions available · {downloaded} already downloaded (✓)",
+                choices.len()
             )
-            .input_style(theme::input)
+        };
+        let dropdown: Element<'a, Message> = if self.versions.is_some() {
+            pick_list(choices, selected, |c: crate::VersionChoice| {
+                Message::NewVersion(c.id)
+            })
+            .placeholder("Choose a Minecraft version")
+            .style(theme::picker)
             .padding(10)
+            .width(Length::Fill)
             .into()
         } else {
-            text("Loading versions…").color(theme::MUTED).into()
+            text("Loading versions from Mojang…")
+                .color(theme::MUTED)
+                .into()
         };
+        let versions: Element<'a, Message> = column![
+            row![
+                dropdown,
+                button(text("Refresh").size(13))
+                    .padding([10, 14])
+                    .style(theme::glass_button)
+                    .on_press_maybe(
+                        (!self.refreshing_versions).then_some(Message::RefreshVersions)
+                    ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            row(filters).spacing(6),
+            text(status).size(12).color(theme::MUTED),
+        ]
+        .spacing(8)
+        .into();
         let can_create = form.version.is_some();
         column![
             // Actions sit in the header so they're visible without scrolling.
@@ -691,9 +780,6 @@ impl App {
                     .padding(10),
             ),
             field("Minecraft version", versions),
-            checkbox(form.snapshots)
-                .label("Show snapshots")
-                .on_toggle(Message::NewSnapshots),
             self.loader_picker(&form.loader, form.version.as_deref()),
             checkbox(form.low_end)
                 .label("Low-end graphics defaults (render distance 6, 60 FPS cap, fast graphics)")
@@ -884,6 +970,127 @@ impl App {
         };
 
         container(column![header, content].spacing(16))
+            .padding(20)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::glass)
+            .into()
+    }
+
+    fn modpacks_screen<'a>(&'a self, view: &'a PacksView) -> Element<'a, Message> {
+        let header = row![
+            button(text("← Back").size(14))
+                .style(theme::link)
+                .on_press(Message::ShowHome),
+            text("Modpacks").size(24).font(BOLD),
+            chip("Modrinth", theme::SUCCESS),
+            space::horizontal(),
+            button(text("Import .mrpack…").size(14).font(BOLD))
+                .padding([8, 16])
+                .style(theme::play)
+                .on_press(Message::ImportPack),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        let search = row![
+            text_input(
+                "Search modpacks (e.g. fabulously optimized, cobblemon, create)",
+                &view.query
+            )
+            .on_input(Message::PacksQuery)
+            .on_submit(Message::PacksSearch)
+            .style(theme::input)
+            .padding(10),
+            button(text("Search").font(BOLD))
+                .padding([10, 20])
+                .style(theme::play)
+                .on_press(Message::PacksSearch),
+        ]
+        .spacing(10);
+        let hint = text(
+            "Each modpack becomes a new instance with its own Minecraft version, mod loader, mods and settings. \
+             You can also drop a .mrpack file anywhere on the window.",
+        )
+        .size(12)
+        .color(theme::MUTED);
+
+        let results: Element<'a, Message> = match &view.results {
+            None | Some(Load::Loading) => container(text("Loading modpacks…").color(theme::MUTED))
+                .center(Length::Fill)
+                .into(),
+            Some(Load::Failed(e)) => {
+                container(text(format!("Search failed: {e}")).color(theme::DANGER))
+                    .center(Length::Fill)
+                    .into()
+            }
+            Some(Load::Ready(hits)) if hits.is_empty() => {
+                container(text("No modpacks found.").color(theme::MUTED))
+                    .center(Length::Fill)
+                    .into()
+            }
+            Some(Load::Ready(hits)) => {
+                let mut list = column(hits.iter().map(|hit| {
+                    let action: Element<'a, Message> = match self.pack_jobs.get(&hit.project_id) {
+                        Some(job) => {
+                            let (done, total) =
+                                job.stage.as_ref().map_or((0, 1), |(_, d, t)| (*d, *t));
+                            column![
+                                text("Installing…").size(12).color(theme::WARNING),
+                                progress_bar(0.0..=total.max(1) as f32, done as f32)
+                                    .girth(6)
+                                    .style(theme::progress),
+                            ]
+                            .spacing(4)
+                            .width(120)
+                            .into()
+                        }
+                        None => button(text("Install").size(13).font(BOLD))
+                            .padding([8, 18])
+                            .style(theme::play)
+                            .on_press(Message::InstallPack(hit.project_id.clone()))
+                            .into(),
+                    };
+                    container(
+                        row![
+                            column![
+                                row![
+                                    text(&hit.title).size(15).font(BOLD),
+                                    text(format!("by {}", hit.author))
+                                        .size(12)
+                                        .color(theme::MUTED),
+                                ]
+                                .spacing(8)
+                                .align_y(Alignment::Center),
+                                text(&hit.description).size(13).color(theme::MUTED),
+                                text(format!("{} downloads", short_count(hit.downloads)))
+                                    .size(11)
+                                    .color(theme::VIOLET_BRIGHT),
+                            ]
+                            .spacing(4)
+                            .width(Length::Fill),
+                            action,
+                        ]
+                        .spacing(14)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([12, 14])
+                    .style(theme::row_item)
+                    .into()
+                }))
+                .spacing(8);
+                if (hits.len() as u64) < view.total {
+                    list = list.push(
+                        container(small_button("Load more").on_press(Message::PacksMore))
+                            .center_x(Length::Fill),
+                    );
+                }
+                scrollable(list)
+                    .style(theme::scroll)
+                    .height(Length::Fill)
+                    .into()
+            }
+        };
+        container(column![header, search, hint, results].spacing(14))
             .padding(20)
             .width(Length::Fill)
             .height(Length::Fill)

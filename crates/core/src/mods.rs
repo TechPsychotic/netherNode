@@ -361,6 +361,72 @@ pub async fn install(
     Ok(installed)
 }
 
+/// Look up unidentified jars (added by hand or by a modpack) on Modrinth by their SHA-1,
+/// so the list shows real names. Returns how many were identified.
+pub async fn identify(http: &reqwest::Client, paths: &Paths, instance: &Instance) -> Result<usize> {
+    let mut index = load_index(paths, instance);
+    let mut by_hash = std::collections::HashMap::new();
+    for m in list(paths, instance)?
+        .into_iter()
+        .filter(|m| m.info.is_none())
+    {
+        let path = mod_path(paths, instance, &m.file_name, m.enabled);
+        if let Ok(hash) = download::sha1_file(&path) {
+            by_hash.insert(hash, m.file_name);
+        }
+    }
+    if by_hash.is_empty() {
+        return Ok(0);
+    }
+    let body =
+        serde_json::json!({ "hashes": by_hash.keys().collect::<Vec<_>>(), "algorithm": "sha1" });
+    let found: std::collections::HashMap<String, Version> = http
+        .post(format!("{MODRINTH}/version_files"))
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if found.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<&str> = found.values().map(|v| v.project_id.as_str()).collect();
+    let projects: Vec<Project> = http
+        .get(format!("{MODRINTH}/projects"))
+        .query(&[("ids", serde_json::to_string(&ids)?)])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let titles: std::collections::HashMap<&str, &str> = projects
+        .iter()
+        .map(|p| (p.id.as_str(), p.title.as_str()))
+        .collect();
+    for (hash, version) in &found {
+        let Some(file) = by_hash.get(hash) else {
+            continue;
+        };
+        let title = titles
+            .get(version.project_id.as_str())
+            .copied()
+            .unwrap_or(file)
+            .to_string();
+        index.insert(
+            file.clone(),
+            IndexEntry {
+                project_id: version.project_id.clone(),
+                version_id: version.id.clone(),
+                title,
+                version_number: version.version_number.clone(),
+            },
+        );
+    }
+    save_index(paths, instance, &index)?;
+    Ok(found.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

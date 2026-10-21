@@ -5,15 +5,16 @@
 //! - `NETHERNODE_SNAPSHOT_INSTANCE=<name>` selects the instance first.
 //! - `NETHERNODE_SNAPSHOT_CLOSE=1` instead starts the game and closes the window mid-game.
 //!
-//! Screens: home, new, new-forge, new-optifine, edit, accounts, mods, browse, playing
-//! (presses Play, waits 25 s) and stopped (presses Stop).
+//! Screens: home, new, new-all, new-forge, new-optifine, edit, accounts, mods, browse,
+//! modpacks, playing (presses Play, waits 25 s), stopped (presses Stop), drop-pack (drops
+//! `$NETHERNODE_SNAPSHOT_PACK` on the window, captures after 5 s) and home-later (150 s wait).
 
 use std::time::Duration;
 
 use iced::{Task, window};
 use nethernode_core::loader::LoaderKind;
 
-use crate::{App, Message, ModsTab};
+use crate::{App, Message, ModsTab, VersionFilter};
 
 const DEFAULT: &str = "home,new,new-forge,new-optifine,edit,accounts,mods,browse";
 
@@ -75,6 +76,25 @@ pub fn update(app: &mut App, step: Step) -> Task<Message> {
                     send(app, Message::ShowNewInstance);
                     send(app, Message::PickLoader(Some(LoaderKind::Fabric)));
                     2500
+                }
+                "new-all" => {
+                    send(app, Message::ShowNewInstance);
+                    send(app, Message::NewFilter(VersionFilter::All));
+                    2500
+                }
+                "modpacks" => {
+                    send(app, Message::ShowModpacks);
+                    3500
+                }
+                "drop-pack" => {
+                    let pack = std::env::var("NETHERNODE_SNAPSHOT_PACK").unwrap_or_default();
+                    send(app, Message::ShowHome);
+                    send(app, Message::FileDropped(pack.into()));
+                    5000
+                }
+                "home-later" => {
+                    send(app, Message::ShowHome);
+                    150_000
                 }
                 "new-forge" => {
                     send(app, Message::ShowNewInstance);

@@ -30,6 +30,9 @@ pub struct Instance {
     /// The Minecraft version, when it differs from `version` (i.e. with a loader).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minecraft: Option<String>,
+    /// Set when the instance was created from a modpack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modpack: Option<crate::modpack::ModpackInfo>,
 }
 
 /// Names must be valid folder names on Windows, macOS and Linux alike.
@@ -67,6 +70,7 @@ impl Instance {
             resolution: None,
             loader: None,
             minecraft: None,
+            modpack: None,
         })
     }
 
@@ -144,12 +148,51 @@ impl Instance {
         Ok(())
     }
 
+    /// Marker present while an instance is still being built (e.g. a modpack import).
+    /// The builder holds an OS lock on it, which is released even if the process dies.
+    pub const INSTALLING: &'static str = ".installing";
+
+    /// Start building this instance: hidden from [`Instance::list`] until the returned
+    /// guard is finished with [`Installing::done`].
+    pub fn begin_install(&self, paths: &Paths) -> Result<Installing> {
+        let path = self.dir(paths).join(Self::INSTALLING);
+        let file = std::fs::File::create(&path)?;
+        file.try_lock()
+            .map_err(|_| other("this instance is already being installed"))?;
+        Ok(Installing { _file: file, path })
+    }
+
+    /// Remove instances whose install was interrupted (marker present, nobody holding it).
+    pub fn clean_interrupted(paths: &Paths) -> Vec<String> {
+        let mut removed = Vec::new();
+        let Ok(entries) = std::fs::read_dir(paths.instances()) else {
+            return removed;
+        };
+        for entry in entries.flatten() {
+            let marker = entry.path().join(Self::INSTALLING);
+            let Ok(file) = std::fs::OpenOptions::new().write(true).open(&marker) else {
+                continue;
+            };
+            if file.try_lock().is_ok() {
+                drop(file);
+                if std::fs::remove_dir_all(entry.path()).is_ok() {
+                    removed.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        removed
+    }
+
     pub fn list(paths: &Paths) -> Result<Vec<Self>> {
         let mut out = Vec::new();
         let Ok(entries) = std::fs::read_dir(paths.instances()) else {
             return Ok(out);
         };
         for entry in entries.flatten() {
+            // Still being built (see begin_install): not ready to show or play.
+            if entry.path().join(Self::INSTALLING).exists() {
+                continue;
+            }
             if let Some(name) = entry.file_name().to_str()
                 && let Ok(instance) = Self::load(paths, name)
             {
@@ -161,9 +204,23 @@ impl Instance {
     }
 }
 
+/// Held while an instance is being built; see [`Instance::begin_install`].
+pub struct Installing {
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+impl Installing {
+    /// The instance is complete: show it in the list.
+    pub fn done(self) -> Result<()> {
+        std::fs::remove_file(&self.path)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_name;
+    use super::{Instance, Paths, validate_name};
 
     #[test]
     fn names_valid_on_every_os() {
@@ -183,5 +240,27 @@ mod tests {
         ] {
             assert!(validate_name(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn interrupted_installs_are_hidden_then_cleaned() {
+        let root =
+            std::env::temp_dir().join(format!("nethernode-installing-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::new(&root);
+        let instance = Instance::create(&paths, "pack", "1.21.1", false).unwrap();
+
+        let guard = instance.begin_install(&paths).unwrap();
+        assert!(Instance::list(&paths).unwrap().is_empty());
+        // Held by a live install: not touched.
+        assert!(Instance::clean_interrupted(&paths).is_empty());
+        drop(guard); // as if the process died mid-install
+        assert_eq!(Instance::clean_interrupted(&paths), ["pack"]);
+        assert!(!instance.dir(&paths).exists());
+
+        let finished = Instance::create(&paths, "done", "1.21.1", false).unwrap();
+        finished.begin_install(&paths).unwrap().done().unwrap();
+        assert_eq!(Instance::list(&paths).unwrap().len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

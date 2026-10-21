@@ -142,7 +142,8 @@ Every loader produces a version JSON that `inheritsFrom` the vanilla one. Write 
 
 ## Phase 6: Mod and modpack content
 
-**Done:** Modrinth search filtered by loader and game version; install with required dependencies, preferring release builds; installed list with enable/disable/remove; add jars via file picker or by dropping them onto the window. **To do:** updates, .mrpack modpacks, CurseForge (needs an API key).
+**Done:** Modrinth search filtered by loader and game version; install with required dependencies, preferring release builds; installed list with enable/disable/remove; add jars via file picker or by dropping them onto the window. **Modpacks (done):** `.mrpack` import (file picker, or drop a file anywhere on the window) and one-click install from Modrinth's modpack search. A pack becomes a new instance with its Minecraft version, loader, files and overrides. Downloads only from the hosts the format allows, paths must stay inside the instance, and mod names are identified by hash. Unfinished installs are hidden while running and cleaned up after an interruption.
+**To do:** mod and modpack updates, CurseForge (needs an API key).
 
 
 - **Modrinth API** (`api.modrinth.com/v2`): search, versions by game version + loader, dependencies, and the `.mrpack` modpack format (`modrinth.index.json` + overrides). It is open and easy, so start here.

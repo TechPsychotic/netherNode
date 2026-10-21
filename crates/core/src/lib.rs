@@ -13,6 +13,7 @@ pub mod launch;
 pub mod loader;
 pub mod log;
 pub mod memory;
+pub mod modpack;
 pub mod mods;
 pub mod paths;
 pub mod rules;

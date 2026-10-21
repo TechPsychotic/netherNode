@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use crate::paths::ensure_parent;
 
 const CONCURRENCY: usize = 16;
-const RETRIES: usize = 3;
+const RETRIES: usize = 5;
 
 /// Progress callbacks, so the CLI and a future GUI can render the same events.
 #[derive(Debug, Clone)]
@@ -118,13 +118,22 @@ pub async fn fetch(http: &reqwest::Client, d: &Download) -> Result<()> {
     for attempt in 0..RETRIES {
         match fetch_once(http, d).await {
             Ok(()) => return Ok(()),
+            // A wrong checksum won't fix itself by retrying.
+            Err(e @ Error::Checksum { .. }) => return Err(e),
             Err(e) => {
                 last_err = Some(e);
-                tokio::time::sleep(Duration::from_millis(500 * (attempt as u64 + 1))).await;
+                if attempt + 1 < RETRIES {
+                    // 1, 2, 4, 8 s: rides out brief network drops without stalling long.
+                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                }
             }
         }
     }
-    Err(last_err.expect("at least one attempt"))
+    let err = last_err.expect("at least one attempt");
+    Err(crate::error::other(format!(
+        "couldn't download {} after {RETRIES} tries: {err}",
+        d.url
+    )))
 }
 
 /// Download everything that is missing, in parallel. Reports one `Advance` per item.
