@@ -1,0 +1,101 @@
+name: Release
+
+# Push a tag like v0.1.0 to build every platform and publish a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest }
+          # One universal app for Intel and Apple Silicon.
+          - { name: macos-universal, os: macos-latest }
+          # Older glibc so the binaries run on older distros too.
+          - { name: linux-x64, os: ubuntu-22.04 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        if: runner.os != 'macOS'
+        run: cargo build --release --locked
+
+      - name: Build (macOS, both architectures)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p target/release
+          for bin in nethernode nethernode-gui; do
+            lipo -create -output "target/release/$bin" \
+              "target/aarch64-apple-darwin/release/$bin" "target/x86_64-apple-darwin/release/$bin"
+          done
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/netherNode | Out-Null
+          Copy-Item target/release/nethernode-gui.exe, target/release/nethernode.exe dist/netherNode/
+          Copy-Item packaging/README-release.txt dist/netherNode/README.txt
+          Compress-Archive -Path dist/netherNode -DestinationPath "dist/netherNode-$env:TAG-windows-x64.zip"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          packaging/macos/make-app.sh
+          mkdir -p dist
+          ditto -c -k --keepParent target/release/netherNode.app "dist/netherNode-$TAG-macos-universal.zip"
+          hdiutil create -volname netherNode -srcfolder target/release/netherNode.app -ov -format UDZO \
+            "dist/netherNode-$TAG-macos-universal.dmg"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/netherNode/icons
+          cp target/release/nethernode target/release/nethernode-gui dist/netherNode/
+          cp packaging/linux/install.sh packaging/linux/nethernode.desktop dist/netherNode/
+          cp -r assets/icons/png dist/netherNode/icons/
+          cp packaging/README-release.txt dist/netherNode/README.txt
+          tar -C dist -czf "dist/netherNode-$TAG-linux-x64.tar.gz" netherNode
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.dmg
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: netherNode ${{ github.ref_name }}
+          prerelease: true
+          body_path: packaging/release-notes.md
+          files: dist/*

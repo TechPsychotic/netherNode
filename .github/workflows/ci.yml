@@ -1,12 +1,31 @@
 name: CI
 
+# Pushes run the cheap Linux checks. Windows and macOS runners cost more Actions minutes on
+# a private repo (macOS counts 10x), so the full matrix runs on demand:
+# Actions -> CI -> "Run workflow".
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
+  linux:
+    name: Linux x64
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  all-platforms:
     name: ${{ matrix.name }}
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -15,30 +34,12 @@ jobs:
           - { name: Linux x64, os: ubuntu-latest }
           - { name: Linux ARM64, os: ubuntu-24.04-arm }
           - { name: Windows x64, os: windows-latest }
-          - { name: macOS Apple Silicon, os: macos-latest }
-          - { name: macOS Intel, os: macos-13 }
+          - { name: macOS, os: macos-latest }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo build --release
-      - if: runner.os == 'macOS'
-        run: packaging/macos/make-app.sh
-      - if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
-        with:
-          name: netherNode-app-${{ runner.arch }}
-          path: target/release/netherNode.app
-      - uses: actions/upload-artifact@v4
-        with:
-          name: nethernode-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            target/release/nethernode
-            target/release/nethernode.exe
-            target/release/nethernode-gui
-            target/release/nethernode-gui.exe
-          if-no-files-found: error
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked

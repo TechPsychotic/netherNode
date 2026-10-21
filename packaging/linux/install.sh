@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Installs netherNode for the current user (no root needed):
 #   binaries -> ~/.local/bin, icons -> ~/.local/share/icons, menu entry -> ~/.local/share/applications
-# Usage: packaging/linux/install.sh [--uninstall]
-# Build first with: cargo build --release
+# Usage: ./install.sh [--uninstall]
+# From a source checkout, build first with: cargo build --release
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 bin="$HOME/.local/bin"
@@ -16,14 +16,21 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 
+# Works from a release tarball (files next to this script) or a source checkout.
+here="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "$here/nethernode-gui" ]; then
+    bins="$here" icons="$here/icons/png" desktop="$here/nethernode.desktop"
+else
+    bins="$root/target/release" icons="$root/assets/icons/png" desktop="$root/packaging/linux/nethernode.desktop"
+fi
 for b in nethernode nethernode-gui; do
-    [ -x "$root/target/release/$b" ] || { echo "missing target/release/$b; run: cargo build --release" >&2; exit 1; }
-    install -Dm755 "$root/target/release/$b" "$bin/$b"
+    [ -x "$bins/$b" ] || { echo "missing $bins/$b; run: cargo build --release" >&2; exit 1; }
+    install -Dm755 "$bins/$b" "$bin/$b"
 done
 for s in "${sizes[@]}"; do
-    install -Dm644 "$root/assets/icons/png/$s.png" "$share/icons/hicolor/${s}x${s}/apps/nethernode.png"
+    install -Dm644 "$icons/$s.png" "$share/icons/hicolor/${s}x${s}/apps/nethernode.png"
 done
-install -Dm644 "$root/packaging/linux/nethernode.desktop" "$share/applications/nethernode.desktop"
+install -Dm644 "$desktop" "$share/applications/nethernode.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database -q "$share/applications" || true
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$share/icons/hicolor" || true
 echo "installed: run 'nethernode-gui' or find netherNode in your app menu"

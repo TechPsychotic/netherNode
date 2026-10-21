@@ -32,7 +32,7 @@ An offline-accounts Minecraft launcher for Linux, macOS and Windows, written in 
 1. **Test on real Windows and macOS machines.** Everything compiles for both but has never actually run there. Check:
    - Windows: no stray console windows, the exe icon, the console-close/stop behaviour, paths with spaces or non-English characters, the 32 KB command-line limit with big modpacks (Java `@argfiles`).
    - macOS: the `.app` opens (Gatekeeper), Apple Silicon running Java 8/16 under Rosetta, `-XstartOnFirstThread`.
-2. **Get CI running.** Put the repo on GitHub so `.github/workflows/ci.yml` builds and tests on all 5 runners and produces downloadable builds.
+2. **CI and releases.** The private GitHub repo runs Linux checks on each push and the full matrix on demand. Pushing a `v*` tag builds Windows, macOS (universal) and Linux and publishes a pre-release. Remaining: confirm the first release builds pass everywhere.
 3. **Settings screen.** Global defaults: memory, window size, Java path, data folder location, animation, close-launcher-on-play. Today these are per instance or hard-coded.
 4. **Mod updates.** "Updates available" on the Mods screen: compare each mod's Modrinth version with the newest compatible one and update one or all, keeping enabled/disabled state.
 5. **Self-updater.** Check GitHub Releases, verify a signature, then replace the binary (or point users to their package manager).
