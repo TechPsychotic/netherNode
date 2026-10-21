@@ -49,6 +49,7 @@ pub fn launch(
     paths: Paths,
     instance: Instance,
     account: Account,
+    quick_play: Option<launch::QuickPlay>,
     stop: oneshot::Receiver<()>,
 ) -> impl Stream<Item = Event> {
     let (tx, rx) = mpsc::unbounded();
@@ -65,7 +66,7 @@ pub fn launch(
         });
 
         let prepared = futures::select! {
-            cmd = launch::prepare(&paths, &instance, &account, None, &progress).fuse() => Some(cmd),
+            cmd = launch::prepare(&paths, &instance, &account, quick_play, &progress).fuse() => Some(cmd),
             () = stop.clone() => None,
         };
         let ended = match prepared {
@@ -202,6 +203,70 @@ pub fn join_share(
         )
         .await;
         let _ = tx.unbounded_send(JoinUpdate::Ended(result.map_err(|e| e.to_string())));
+    };
+    stream::select(rx, stream::once(run).filter_map(|()| async { None }))
+}
+
+/// Progress and output of a server hosted on this PC.
+#[derive(Debug, Clone)]
+pub enum ServerUpdate {
+    Stage { name: String, total: u64 },
+    Advance,
+    Started { heap_mb: u64 },
+    Line(String),
+    Ended(Result<String, String>),
+}
+
+/// Start `server` (downloading Java if needed) and stream its console until it exits.
+/// Lines sent on `commands` go to its console; `stop` saves and stops it.
+pub fn run_server(
+    paths: Paths,
+    server: nethernode_core::server::Server,
+    commands: mpsc::UnboundedReceiver<String>,
+    stop: oneshot::Receiver<()>,
+) -> impl Stream<Item = ServerUpdate> {
+    use nethernode_core::server;
+    let (tx, rx) = mpsc::unbounded();
+    let run = async move {
+        let progress_tx = tx.clone();
+        let progress: ProgressFn = Arc::new(move |event| {
+            let event = match event {
+                Progress::Stage { name, total } => ServerUpdate::Stage { name, total },
+                Progress::Advance => ServerUpdate::Advance,
+            };
+            let _ = progress_tx.unbounded_send(event);
+        });
+        let result = async {
+            let cmd = server::command(
+                &nethernode_core::download::client(),
+                &paths,
+                &server,
+                &progress,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            let _ = tx.unbounded_send(ServerUpdate::Started {
+                heap_mb: cmd.heap_mb,
+            });
+            let lines = tx.clone();
+            let status = server::run(
+                &cmd,
+                move |line| {
+                    let _ = lines.unbounded_send(ServerUpdate::Line(line));
+                },
+                commands,
+                stop.map(|_| ()),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(if status.success() {
+                "Server stopped".to_string()
+            } else {
+                format!("Server exited ({status})")
+            })
+        }
+        .await;
+        let _ = tx.unbounded_send(ServerUpdate::Ended(result));
     };
     stream::select(rx, stream::once(run).filter_map(|()| async { None }))
 }

@@ -107,6 +107,12 @@ pub struct App {
     /// Modpack installs in progress, by Modrinth project id or file path.
     pack_jobs: HashMap<String, Job>,
     host_share: Option<HostShare>,
+    servers: Vec<nethernode_core::server::Server>,
+    server_runs: HashMap<String, ServerRun>,
+    /// Server downloads in progress, by server name.
+    server_jobs: HashMap<String, Job>,
+    /// Which server kinds exist for each Minecraft version.
+    server_support: HashMap<String, HashMap<nethernode_core::server::ServerKind, Load<bool>>>,
     join_session: Option<JoinSession>,
     /// Which loaders have a release for each Minecraft version (checked when picked).
     loader_support: HashMap<String, HashMap<LoaderKind, Load<bool>>>,
@@ -123,12 +129,54 @@ pub struct Run {
 
 /// The world this computer is sharing with friends over the internet.
 pub struct HostShare {
+    /// Instance or server name, shown in the banner.
     instance: String,
+    /// Sharing a server (rather than a world opened to LAN in a game).
+    is_server: bool,
     code: Option<String>,
     stop: Option<oneshot::Sender<()>>,
     /// Friends waiting for Allow/Deny.
     requests: Vec<(String, game::JoinReply)>,
     friends: Vec<String>,
+}
+
+/// A server running on this PC.
+pub struct ServerRun {
+    stage: Option<(String, u64, u64)>,
+    /// Set once Java is ready and the process started.
+    heap_mb: Option<u64>,
+    /// The server printed "Done": players can join.
+    ready: bool,
+    log: VecDeque<String>,
+    commands: futures::channel::mpsc::UnboundedSender<String>,
+    stop: Option<oneshot::Sender<()>>,
+}
+
+pub struct ServersView {
+    selected: Option<String>,
+    command: String,
+    /// Two-click delete.
+    confirm_delete: bool,
+    settings: Option<ServerSettingsForm>,
+}
+
+/// Editable server.properties values (and the whitelist).
+pub struct ServerSettingsForm {
+    motd: String,
+    max_players: String,
+    gamemode: String,
+    difficulty: String,
+    pvp: bool,
+    whitelist_on: bool,
+    whitelist: String,
+    max_memory: String,
+}
+
+pub struct NewServerForm {
+    name: String,
+    version: Option<String>,
+    kind: nethernode_core::server::ServerKind,
+    eula: bool,
 }
 
 /// A friend's world this computer has joined.
@@ -165,6 +213,8 @@ pub enum Screen {
     Modpacks(PacksView),
     Settings(SettingsForm),
     JoinFriend { code: String, error: Option<String> },
+    Servers(ServersView),
+    NewServer(NewServerForm),
 }
 
 /// Something loaded in the background.
@@ -194,17 +244,33 @@ pub struct NewInstanceForm {
     worlds: Vec<PathBuf>,
 }
 
+/// Fields of the server settings form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerField {
+    Motd,
+    MaxPlayers,
+    Gamemode,
+    Difficulty,
+    Pvp,
+    WhitelistOn,
+    Whitelist,
+    MaxMemory,
+}
+
 /// Which folder a Settings "Change…" button is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FolderKind {
     GameFiles,
     Instances,
+    Servers,
 }
 
 pub struct SettingsForm {
     data_dir: PathBuf,
     /// `None` keeps instances inside the game files folder.
     instances_dir: Option<PathBuf>,
+    /// `None` keeps servers inside the game files folder.
+    servers_dir: Option<PathBuf>,
     move_files: bool,
     renderer: nethernode_core::settings::Renderer,
     animated_background: bool,
@@ -368,6 +434,36 @@ pub enum Message {
     StartJoin,
     JoinUpdate(game::JoinUpdate),
     LeaveFriend,
+    ShowServers,
+    SelectServer(String),
+    ShowNewServer,
+    NewServerName(String),
+    NewServerVersion(String),
+    NewServerKind(nethernode_core::server::ServerKind),
+    NewServerEula(bool),
+    CreateServer,
+    ServerJob(String, game::JobEvent),
+    StartServer(String),
+    StopServer(String),
+    ServerUpdate(String, game::ServerUpdate),
+    ServerCommandInput(String),
+    SendServerCommand,
+    AcceptEula(String),
+    InviteServer(String),
+    PlayOnServer(String),
+    DeleteServer(String),
+    ServerImportWorld(String, bool),
+    ServerSupport(
+        String,
+        nethernode_core::server::ServerKind,
+        Result<bool, String>,
+    ),
+    ServerWorldPicked(String, Option<PathBuf>),
+    ServerWorldImported(String, Result<(), String>),
+    EditServerSettings,
+    ServerSettingsInput(ServerField, String),
+    ServerSettingsToggle(ServerField, bool),
+    SaveServerSettings,
     OptiFineAlternative(bool),
     NewAddWorlds(bool),
     NewWorldsPicked(Vec<PathBuf>),
@@ -379,6 +475,7 @@ pub enum Message {
     SettingsPick(FolderKind),
     SettingsPicked(FolderKind, Option<PathBuf>),
     SettingsResetInstances,
+    SettingsResetServers,
     SettingsMoveFiles(bool),
     SettingsRenderer(nethernode_core::settings::Renderer),
     SettingsAnimation(bool),
@@ -445,6 +542,10 @@ impl App {
             pack_jobs: HashMap::new(),
             loader_support: HashMap::new(),
             host_share: None,
+            servers: nethernode_core::server::Server::list(&paths),
+            server_runs: HashMap::new(),
+            server_jobs: HashMap::new(),
+            server_support: HashMap::new(),
             join_session: None,
             paths: paths.clone(),
         };
@@ -665,6 +766,31 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Check which server kinds exist for `mc` (cached).
+    fn check_server_support(&mut self, mc: Option<String>) -> Task<Message> {
+        use nethernode_core::server::{self, ServerKind};
+        let Some(mc) = mc else { return Task::none() };
+        let known = self.server_support.entry(mc.clone()).or_default();
+        let mut tasks = Vec::new();
+        for kind in [ServerKind::Fabric, ServerKind::Paper] {
+            if known.contains_key(&kind) {
+                continue;
+            }
+            known.insert(kind, Load::Loading);
+            let mc = mc.clone();
+            tasks.push(Task::perform(
+                async move {
+                    let result = server::available(&download::client(), kind, &mc)
+                        .await
+                        .map_err(|e| e.to_string());
+                    (mc, kind, result)
+                },
+                |(mc, kind, result)| Message::ServerSupport(mc, kind, result),
+            ));
+        }
+        Task::batch(tasks)
+    }
+
     /// Whether `kind` is known to have no release for `mc` (unknown counts as available).
     pub fn loader_unavailable(&self, mc: &str, kind: LoaderKind) -> bool {
         let lookup = if kind == LoaderKind::OptiFine {
@@ -841,6 +967,52 @@ impl App {
         self.refresh_mods();
     }
 
+    /// Start an instance, optionally straight into a server (quick play).
+    fn play(
+        &mut self,
+        name: String,
+        quick_play: Option<nethernode_core::launch::QuickPlay>,
+    ) -> Task<Message> {
+        if self.runs.contains_key(&name) || self.jobs.contains_key(&name) {
+            return Task::none();
+        }
+        let Some(instance) = self.instance(&name).cloned() else {
+            return Task::none();
+        };
+        let account = match self.accounts.pick(None) {
+            Ok(a) => a,
+            Err(e) => {
+                self.error(e.to_string());
+                self.screen = Screen::Accounts {
+                    name: String::new(),
+                };
+                return Task::none();
+            }
+        };
+        let (stop_tx, stop_rx) = oneshot::channel();
+        self.runs.insert(
+            name.clone(),
+            Run {
+                stage: None,
+                heap: None,
+                stop: Some(stop_tx),
+                lan_port: None,
+            },
+        );
+        let log = self.logs.entry(name.clone()).or_default();
+        log.clear();
+        log.push_back(format!(
+            "Launching {} as {}…",
+            instance.version, account.name
+        ));
+        self.crashes.remove(&name);
+        self.notice = None;
+        self.selected = Some(name.clone());
+        self.screen = Screen::Home;
+        let stream = game::launch(self.paths.clone(), instance, account, quick_play, stop_rx);
+        Task::run(stream, move |event| Message::Game(name.clone(), event))
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Select(name) => {
@@ -850,46 +1022,7 @@ impl App {
             }
             Message::Hover(name) => self.hovered = name,
 
-            Message::Play(name) => {
-                if self.runs.contains_key(&name) || self.jobs.contains_key(&name) {
-                    return Task::none();
-                }
-                let Some(instance) = self.instance(&name).cloned() else {
-                    return Task::none();
-                };
-                let account = match self.accounts.pick(None) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        self.error(e.to_string());
-                        self.screen = Screen::Accounts {
-                            name: String::new(),
-                        };
-                        return Task::none();
-                    }
-                };
-                let (stop_tx, stop_rx) = oneshot::channel();
-                self.runs.insert(
-                    name.clone(),
-                    Run {
-                        stage: None,
-                        heap: None,
-                        stop: Some(stop_tx),
-                        lan_port: None,
-                    },
-                );
-                let log = self.logs.entry(name.clone()).or_default();
-                log.clear();
-                log.push_back(format!(
-                    "Launching {} as {}…",
-                    instance.version, account.name
-                ));
-                self.crashes.remove(&name);
-                self.notice = None;
-                self.selected = Some(name.clone());
-                self.screen = Screen::Home;
-                let stream = game::launch(self.paths.clone(), instance, account, stop_rx);
-                return Task::run(stream, move |event| Message::Game(name.clone(), event));
-            }
+            Message::Play(name) => return self.play(name, None),
 
             Message::Stop(name) => {
                 if let Some(stop) = self.runs.get_mut(&name).and_then(|r| r.stop.take()) {
@@ -939,7 +1072,10 @@ impl App {
                     game::Event::Finished(ended) => {
                         self.runs.remove(&name);
                         // The shared world is gone with the game.
-                        if let Some(share) = self.host_share.as_mut().filter(|s| s.instance == name)
+                        if let Some(share) = self
+                            .host_share
+                            .as_mut()
+                            .filter(|s| !s.is_server && s.instance == name)
                             && let Some(stop) = share.stop.take()
                         {
                             let _ = stop.send(());
@@ -1308,6 +1444,7 @@ impl App {
                 }
                 let (stop_tx, stop_rx) = oneshot::channel();
                 self.host_share = Some(HostShare {
+                    is_server: false,
                     instance: name,
                     code: None,
                     stop: Some(stop_tx),
@@ -1323,11 +1460,24 @@ impl App {
                 match event {
                     game::ShareEvent::Ready(code) => share.code = Some(code),
                     game::ShareEvent::Request(friend, reply) => {
-                        share.requests.push((friend, reply))
+                        let world = share.instance.clone();
+                        share.requests.push((friend, reply));
+                        return alert(
+                            "A friend wants to join",
+                            &format!(
+                                "Someone with your code wants to join {world}. Open netherNode to allow or deny."
+                            ),
+                            true,
+                        );
                     }
                     game::ShareEvent::Joined(friend) => {
                         self.notice = Some((false, format!("{friend} joined your world")));
-                        share.friends.push(friend);
+                        share.friends.push(friend.clone());
+                        return alert(
+                            "Friend joined",
+                            &format!("{friend} is connected to {}", share.instance),
+                            false,
+                        );
                     }
                     game::ShareEvent::Left(friend) => share.friends.retain(|f| *f != friend),
                     game::ShareEvent::Ended(result) => {
@@ -1414,6 +1564,515 @@ impl App {
                 }
             }
 
+            Message::ShowServers => {
+                self.servers = nethernode_core::server::Server::list(&self.paths);
+                let selected = match &self.screen {
+                    Screen::Servers(v) => v.selected.clone(),
+                    _ => None,
+                }
+                .filter(|n| self.servers.iter().any(|s| &s.name == n))
+                .or_else(|| self.servers.first().map(|s| s.name.clone()));
+                self.screen = Screen::Servers(ServersView {
+                    selected,
+                    command: String::new(),
+                    confirm_delete: false,
+                    settings: None,
+                });
+            }
+            Message::SelectServer(name) => {
+                if let Screen::Servers(v) = &mut self.screen {
+                    v.selected = Some(name);
+                    v.confirm_delete = false;
+                    v.settings = None;
+                }
+            }
+            Message::ShowNewServer => {
+                let version = self
+                    .version_choices(VersionFilter::Releases)
+                    .first()
+                    .map(|c| c.id.clone());
+                self.screen = Screen::NewServer(NewServerForm {
+                    name: String::new(),
+                    version: version.clone(),
+                    kind: nethernode_core::server::ServerKind::Vanilla,
+                    eula: false,
+                });
+                return self.check_server_support(version);
+            }
+            Message::NewServerName(name) => {
+                if let Screen::NewServer(f) = &mut self.screen {
+                    f.name = name;
+                }
+            }
+            Message::NewServerVersion(version) => {
+                if let Screen::NewServer(f) = &mut self.screen {
+                    f.version = Some(version.clone());
+                }
+                return self.check_server_support(Some(version));
+            }
+            Message::NewServerKind(kind) => {
+                if let Screen::NewServer(f) = &mut self.screen {
+                    f.kind = kind;
+                }
+            }
+            Message::NewServerEula(on) => {
+                if let Screen::NewServer(f) = &mut self.screen {
+                    f.eula = on;
+                }
+            }
+            Message::ServerSupport(mc, kind, result) => {
+                let state = match result {
+                    Ok(available) => Load::Ready(available),
+                    Err(e) => Load::Failed(e),
+                };
+                self.server_support
+                    .entry(mc)
+                    .or_default()
+                    .insert(kind, state);
+            }
+            Message::CreateServer => {
+                use nethernode_core::server::{self, Server};
+                let Screen::NewServer(f) = &self.screen else {
+                    return Task::none();
+                };
+                let Some(version) = f.version.clone() else {
+                    self.error("Pick a Minecraft version first");
+                    return Task::none();
+                };
+                if !f.eula {
+                    self.error(
+                        "Tick the box to accept the Minecraft EULA; servers can't start without it",
+                    );
+                    return Task::none();
+                }
+                let name = if f.name.trim().is_empty() {
+                    format!("{} {version}", f.kind.name())
+                } else {
+                    f.name.trim().to_string()
+                };
+                let mut created = match Server::create(&self.paths, &name, &version, f.kind) {
+                    Ok(created) => created,
+                    Err(e) => {
+                        self.error(e.to_string());
+                        return Task::none();
+                    }
+                };
+                if let Err(e) = server::accept_eula(&self.paths, &created) {
+                    self.error(e.to_string());
+                    return Task::none();
+                }
+                self.servers = Server::list(&self.paths);
+                self.server_jobs.insert(
+                    name.clone(),
+                    Job {
+                        label: "Downloading the server".into(),
+                        stage: None,
+                    },
+                );
+                self.screen = Screen::Servers(ServersView {
+                    selected: Some(name.clone()),
+                    command: String::new(),
+                    confirm_delete: false,
+                    settings: None,
+                });
+                let paths = self.paths.clone();
+                let stream = game::job(move |progress| async move {
+                    let result =
+                        server::install(&download::client(), &paths, &mut created, &progress).await;
+                    if result.is_err() {
+                        let _ = Server::delete(&paths, &created.name);
+                    }
+                    result
+                        .map(|()| "ready to start".to_string())
+                        .map_err(|e| e.to_string())
+                });
+                return Task::run(stream, move |event| Message::ServerJob(name.clone(), event));
+            }
+            Message::ServerJob(name, event) => match event {
+                game::JobEvent::Stage { name: stage, total } => {
+                    if let Some(job) = self.server_jobs.get_mut(&name) {
+                        job.stage = Some((stage, 0, total));
+                    }
+                }
+                game::JobEvent::Advance => {
+                    if let Some((_, done, _)) = self
+                        .server_jobs
+                        .get_mut(&name)
+                        .and_then(|j| j.stage.as_mut())
+                    {
+                        *done += 1;
+                    }
+                }
+                game::JobEvent::Done(result) => {
+                    self.server_jobs.remove(&name);
+                    self.servers = nethernode_core::server::Server::list(&self.paths);
+                    match result {
+                        Ok(msg) => self.notice = Some((false, format!("Server {name}: {msg}"))),
+                        Err(e) => self.error(format!("Couldn't set up {name}: {e}")),
+                    }
+                }
+            },
+            Message::StartServer(name) => {
+                if self.server_runs.contains_key(&name) {
+                    return Task::none();
+                }
+                let Some(server) = self.servers.iter().find(|s| s.name == name).cloned() else {
+                    return Task::none();
+                };
+                let (commands_tx, commands_rx) = futures::channel::mpsc::unbounded();
+                let (stop_tx, stop_rx) = oneshot::channel();
+                self.server_runs.insert(
+                    name.clone(),
+                    ServerRun {
+                        stage: None,
+                        heap_mb: None,
+                        ready: false,
+                        log: VecDeque::from([format!("Starting {name}…")]),
+                        commands: commands_tx,
+                        stop: Some(stop_tx),
+                    },
+                );
+                let stream = game::run_server(self.paths.clone(), server, commands_rx, stop_rx);
+                return Task::run(stream, move |update| {
+                    Message::ServerUpdate(name.clone(), update)
+                });
+            }
+            Message::StopServer(name) => {
+                if let Some(stop) = self.server_runs.get_mut(&name).and_then(|r| r.stop.take()) {
+                    let _ = stop.send(());
+                }
+            }
+            Message::ServerUpdate(name, update) => {
+                let port = self
+                    .servers
+                    .iter()
+                    .find(|s| s.name == name)
+                    .map_or(0, |s| s.port);
+                let Some(run) = self.server_runs.get_mut(&name) else {
+                    return Task::none();
+                };
+                match update {
+                    game::ServerUpdate::Stage { name: stage, total } => {
+                        run.stage = Some((stage, 0, total))
+                    }
+                    game::ServerUpdate::Advance => {
+                        if let Some((_, done, _)) = run.stage.as_mut() {
+                            *done += 1;
+                        }
+                    }
+                    game::ServerUpdate::Started { heap_mb } => {
+                        run.stage = None;
+                        run.heap_mb = Some(heap_mb);
+                    }
+                    game::ServerUpdate::Line(line) => {
+                        // "Done (12.3s)! For help, type "help"" means players can join.
+                        let became_ready = !run.ready && line.contains("Done (");
+                        if run.log.len() >= LOG_LIMIT {
+                            run.log.pop_front();
+                        }
+                        run.log.push_back(line);
+                        if became_ready {
+                            run.ready = true;
+                            return alert(
+                                "Server ready",
+                                &format!("{name} is running (port {port})"),
+                                false,
+                            );
+                        }
+                    }
+                    game::ServerUpdate::Ended(result) => {
+                        self.server_runs.remove(&name);
+                        if let Some(share) = self
+                            .host_share
+                            .as_mut()
+                            .filter(|s| s.is_server && s.instance == name)
+                            && let Some(stop) = share.stop.take()
+                        {
+                            let _ = stop.send(());
+                        }
+                        match result {
+                            Ok(msg) => self.notice = Some((false, format!("{name}: {msg}"))),
+                            Err(e) => self.error(format!("{name}: {e}")),
+                        }
+                    }
+                }
+            }
+            Message::ServerCommandInput(value) => {
+                if let Screen::Servers(v) = &mut self.screen {
+                    v.command = value;
+                }
+            }
+            Message::SendServerCommand => {
+                let Screen::Servers(v) = &mut self.screen else {
+                    return Task::none();
+                };
+                let command = std::mem::take(&mut v.command);
+                if let (Some(run), false) = (
+                    v.selected
+                        .as_ref()
+                        .and_then(|n| self.server_runs.get_mut(n)),
+                    command.trim().is_empty(),
+                ) {
+                    run.log.push_back(format!("> {command}"));
+                    let _ = run.commands.unbounded_send(command);
+                }
+            }
+            Message::AcceptEula(name) => {
+                if let Some(server) = self.servers.iter().find(|s| s.name == name)
+                    && let Err(e) = nethernode_core::server::accept_eula(&self.paths, server)
+                {
+                    self.error(e.to_string());
+                }
+            }
+            Message::InviteServer(name) => {
+                let Some(server) = self.servers.iter().find(|s| s.name == name) else {
+                    return Task::none();
+                };
+                if !self.server_runs.get(&name).is_some_and(|r| r.ready) {
+                    self.error("Start the server first");
+                    return Task::none();
+                }
+                if self.host_share.is_some() {
+                    self.error("Already sharing something; stop that first");
+                    return Task::none();
+                }
+                let port = server.port;
+                let (stop_tx, stop_rx) = oneshot::channel();
+                self.host_share = Some(HostShare {
+                    instance: name,
+                    is_server: true,
+                    code: None,
+                    stop: Some(stop_tx),
+                    requests: Vec::new(),
+                    friends: Vec::new(),
+                });
+                return Task::run(game::host_share(port, stop_rx), Message::Share);
+            }
+            Message::PlayOnServer(name) => {
+                let Some(server) = self.servers.iter().find(|s| s.name == name).cloned() else {
+                    return Task::none();
+                };
+                // The selected instance if it's the right version, else any that is.
+                let instance = self
+                    .selected
+                    .as_ref()
+                    .and_then(|n| self.instance(n))
+                    .filter(|i| i.minecraft_version() == server.minecraft)
+                    .or_else(|| {
+                        self.instances
+                            .iter()
+                            .find(|i| i.minecraft_version() == server.minecraft)
+                    })
+                    .map(|i| i.name.clone());
+                let Some(instance) = instance else {
+                    self.error(format!(
+                        "Create an instance for Minecraft {} to play on this server",
+                        server.minecraft
+                    ));
+                    return Task::none();
+                };
+                let target = nethernode_core::launch::QuickPlay::Multiplayer(format!(
+                    "localhost:{}",
+                    server.port
+                ));
+                return self.play(instance, Some(target));
+            }
+            Message::DeleteServer(name) => {
+                if self.server_runs.contains_key(&name) {
+                    self.error("Stop the server before deleting it");
+                    return Task::none();
+                }
+                let Screen::Servers(v) = &mut self.screen else {
+                    return Task::none();
+                };
+                if !v.confirm_delete {
+                    v.confirm_delete = true;
+                    return Task::none();
+                }
+                v.confirm_delete = false;
+                v.selected = None;
+                match nethernode_core::server::Server::delete(&self.paths, &name) {
+                    Ok(()) => self.notice = Some((false, format!("Deleted server {name}"))),
+                    Err(e) => self.error(e.to_string()),
+                }
+                return Task::done(Message::ShowServers);
+            }
+            Message::ServerImportWorld(name, zip) => {
+                if self.server_runs.contains_key(&name) {
+                    self.error("Stop the server before replacing its world");
+                    return Task::none();
+                }
+                let dialog = rfd::AsyncFileDialog::new();
+                let pick = move |file: Option<rfd::FileHandle>| {
+                    Message::ServerWorldPicked(name.clone(), file.map(|f| f.path().to_path_buf()))
+                };
+                return if zip {
+                    Task::perform(
+                        dialog
+                            .set_title("Choose a world .zip")
+                            .add_filter("World backup", &["zip"])
+                            .pick_file(),
+                        pick,
+                    )
+                } else {
+                    Task::perform(
+                        dialog
+                            .set_title("Choose a world folder (with level.dat inside)")
+                            .pick_folder(),
+                        pick,
+                    )
+                };
+            }
+            Message::ServerWorldPicked(name, Some(source)) => {
+                let Some(server) = self.servers.iter().find(|s| s.name == name).cloned() else {
+                    return Task::none();
+                };
+                let paths = self.paths.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            nethernode_core::server::import_world(&paths, &server, &source)
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    move |result| Message::ServerWorldImported(name.clone(), result),
+                );
+            }
+            Message::ServerWorldPicked(_, None) => {}
+            Message::ServerWorldImported(name, result) => match result {
+                Ok(()) => {
+                    self.notice = Some((
+                        false,
+                        format!(
+                            "{name} will use the imported world (the old one was kept as a backup)"
+                        ),
+                    ))
+                }
+                Err(e) => self.error(format!("Couldn't import the world: {e}")),
+            },
+            Message::EditServerSettings => {
+                let Screen::Servers(v) = &mut self.screen else {
+                    return Task::none();
+                };
+                let Some(server) = v
+                    .selected
+                    .as_ref()
+                    .and_then(|n| self.servers.iter().find(|s| &s.name == n))
+                else {
+                    return Task::none();
+                };
+                let props = nethernode_core::server::properties(&server.dir(&self.paths));
+                let get = |k: &str, default: &str| {
+                    props.get(k).cloned().unwrap_or_else(|| default.to_string())
+                };
+                v.settings = Some(ServerSettingsForm {
+                    motd: get("motd", ""),
+                    max_players: get("max-players", "10"),
+                    gamemode: get("gamemode", "survival"),
+                    difficulty: get("difficulty", "normal"),
+                    pvp: get("pvp", "true") == "true",
+                    whitelist_on: get("white-list", "false") == "true",
+                    whitelist: nethernode_core::server::whitelist(&self.paths, server).join(", "),
+                    max_memory: server
+                        .max_memory_mb
+                        .map(|m| m.to_string())
+                        .unwrap_or_default(),
+                });
+            }
+            Message::ServerSettingsInput(field, value) => {
+                if let Screen::Servers(ServersView {
+                    settings: Some(f), ..
+                }) = &mut self.screen
+                {
+                    match field {
+                        ServerField::Motd => f.motd = value,
+                        ServerField::MaxPlayers => {
+                            f.max_players =
+                                value.chars().filter(char::is_ascii_digit).take(4).collect()
+                        }
+                        ServerField::Gamemode => f.gamemode = value,
+                        ServerField::Difficulty => f.difficulty = value,
+                        ServerField::Whitelist => f.whitelist = value,
+                        ServerField::MaxMemory => {
+                            f.max_memory =
+                                value.chars().filter(char::is_ascii_digit).take(6).collect()
+                        }
+                        ServerField::Pvp | ServerField::WhitelistOn => {}
+                    }
+                }
+            }
+            Message::ServerSettingsToggle(field, on) => {
+                if let Screen::Servers(ServersView {
+                    settings: Some(f), ..
+                }) = &mut self.screen
+                {
+                    match field {
+                        ServerField::Pvp => f.pvp = on,
+                        ServerField::WhitelistOn => f.whitelist_on = on,
+                        _ => {}
+                    }
+                }
+            }
+            Message::SaveServerSettings => {
+                use nethernode_core::server;
+                let Screen::Servers(v) = &mut self.screen else {
+                    return Task::none();
+                };
+                let (Some(name), Some(f)) = (v.selected.clone(), v.settings.as_ref()) else {
+                    return Task::none();
+                };
+                let Some(mut srv) = self.servers.iter().find(|s| s.name == name).cloned() else {
+                    return Task::none();
+                };
+                let names: Vec<String> = f
+                    .whitelist
+                    .split([',', ' ', '\n'])
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(String::from)
+                    .collect();
+                srv.max_memory_mb = f.max_memory.parse::<u32>().ok().filter(|m| *m >= 512);
+                let dir = srv.dir(&self.paths);
+                let pvp = if f.pvp { "true" } else { "false" };
+                let result = server::set_properties(
+                    &dir,
+                    &[
+                        ("motd", f.motd.as_str()),
+                        (
+                            "max-players",
+                            if f.max_players.is_empty() {
+                                "10"
+                            } else {
+                                f.max_players.as_str()
+                            },
+                        ),
+                        ("gamemode", f.gamemode.as_str()),
+                        ("difficulty", f.difficulty.as_str()),
+                        ("pvp", pvp),
+                    ],
+                )
+                .and_then(|()| server::set_whitelist(&self.paths, &srv, f.whitelist_on, &names))
+                .and_then(|()| srv.save(&self.paths));
+                match result {
+                    Ok(()) => {
+                        v.settings = None;
+                        self.servers = server::Server::list(&self.paths);
+                        let running = self.server_runs.contains_key(&name);
+                        self.notice = Some((
+                            false,
+                            if running {
+                                "Saved. Restart the server to apply.".into()
+                            } else {
+                                "Server settings saved".into()
+                            },
+                        ));
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
+
             Message::LoaderSupport(mc, kind, result) => {
                 // A failed check (e.g. offline) leaves the loader selectable.
                 let state = match result {
@@ -1474,6 +2133,8 @@ impl App {
                 self.screen = Screen::Settings(SettingsForm {
                     data_dir: self.paths.root.clone(),
                     instances_dir: Some(self.paths.instances()).filter(|d| *d != default_instances),
+                    servers_dir: Some(self.paths.servers())
+                        .filter(|d| *d != self.paths.root.join("servers")),
                     move_files: true,
                     renderer: self.settings.renderer,
                     animated_background: self.settings.animated_background,
@@ -1484,6 +2145,7 @@ impl App {
                 let title = match which {
                     FolderKind::GameFiles => "Folder for game files (versions, libraries, Java)",
                     FolderKind::Instances => "Folder for instances and worlds",
+                    FolderKind::Servers => "Folder for servers and their worlds",
                 };
                 return Task::perform(
                     rfd::AsyncFileDialog::new().set_title(title).pick_folder(),
@@ -1497,6 +2159,7 @@ impl App {
                     match which {
                         FolderKind::GameFiles => f.data_dir = folder,
                         FolderKind::Instances => f.instances_dir = Some(folder),
+                        FolderKind::Servers => f.servers_dir = Some(folder),
                     }
                 }
             }
@@ -1504,6 +2167,11 @@ impl App {
             Message::SettingsResetInstances => {
                 if let Screen::Settings(f) = &mut self.screen {
                     f.instances_dir = None;
+                }
+            }
+            Message::SettingsResetServers => {
+                if let Screen::Settings(f) = &mut self.screen {
+                    f.servers_dir = None;
                 }
             }
             Message::SettingsMoveFiles(on) => {
@@ -1532,13 +2200,16 @@ impl App {
                     data_dir: Some(f.data_dir.clone())
                         .filter(|d| *d != nethernode_core::paths::Paths::default_root()),
                     instances_dir: f.instances_dir.clone(),
+                    servers_dir: f.servers_dir.clone(),
                     renderer: f.renderer,
                     animated_background: f.animated_background,
                 };
                 let old = self.paths.clone();
                 let target = new.paths();
-                let folders_changed =
-                    target.root != old.root || target.instances() != old.instances();
+                let folders_changed = target.root != old.root
+                    || target.instances() != old.instances()
+                    || target.servers() != old.servers();
+                let busy = busy || !self.server_runs.is_empty();
                 if folders_changed && busy {
                     self.error("Stop running games and finish installs before moving folders");
                     return Task::none();
@@ -1554,6 +2225,10 @@ impl App {
                             // Instances first (they may live inside the game files folder).
                             if target.instances() != old.instances() {
                                 move_dir(&old.instances(), &target.instances())
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            if target.servers() != old.servers() {
+                                move_dir(&old.servers(), &target.servers())
                                     .map_err(|e| e.to_string())?;
                             }
                             if target.root != old.root {
@@ -1959,6 +2634,27 @@ impl App {
                 }
             }
         }
+        Task::none()
+    }
+}
+
+/// Desktop notification, plus a taskbar flash / dock bounce when `urgent`, for things the
+/// player should see while they're in the game.
+fn alert(title: &str, body: &str, urgent: bool) -> Task<Message> {
+    let (title, body) = (title.to_string(), body.to_string());
+    // Showing a notification can block briefly (D-Bus, WinRT), so keep it off the UI thread.
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new()
+            .appname("netherNode")
+            .summary(&title)
+            .body(&body)
+            .show();
+    });
+    if urgent {
+        window::latest().and_then(|id| {
+            window::request_user_attention(id, Some(window::UserAttention::Critical))
+        })
+    } else {
         Task::none()
     }
 }

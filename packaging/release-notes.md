@@ -22,6 +22,8 @@
 - OptiFine: a one-click open-source alternative, or a real OptiFine jar.
 - Import worlds (folders or .zip), and move the game files or instances folder in Settings.
 - Play with friends over the internet: Invite friends / Join friend, no port forwarding.
+- Host a server on your PC (Vanilla, Fabric or Paper), shareable with the same Invite friends.
+- Desktop notifications for join requests and server status.
 - Mods and modpacks from Modrinth, `.mrpack` import, drag & drop.
 - Memory sized to your computer, crash detection with fixes, and a 1280×720 game window by default.
 
@@ -32,6 +34,8 @@
 - An OptiFine instance (one-click alternative) launches.
 - Importing a world, and moving the instances folder in Settings.
 - Invite friends: open a world to LAN, invite, and join from another PC or network with the code.
+- Servers: create one, accept the EULA, Start, Invite friends, and join with "Play on it".
+- A join request shows a desktop notification and flashes the taskbar.
 - The app starts, and an account and an instance can be created.
 - A vanilla version (e.g. 1.21.1) and an older one (e.g. 1.12.2) launch.
 - A Fabric instance with Sodium launches.

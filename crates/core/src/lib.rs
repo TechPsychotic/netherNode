@@ -17,6 +17,7 @@ pub mod modpack;
 pub mod mods;
 pub mod paths;
 pub mod rules;
+pub mod server;
 pub mod settings;
 pub mod share;
 pub mod version;

@@ -28,6 +28,8 @@ pub struct Settings {
     pub data_dir: Option<PathBuf>,
     /// Instances and their worlds. `None` = `<data_dir>/instances`.
     pub instances_dir: Option<PathBuf>,
+    /// Servers hosted on this PC. `None` = `<data_dir>/servers`.
+    pub servers_dir: Option<PathBuf>,
     pub renderer: Renderer,
     pub animated_background: bool,
 }
@@ -37,6 +39,7 @@ impl Default for Settings {
         Self {
             data_dir: None,
             instances_dir: None,
+            servers_dir: None,
             renderer: Renderer::Auto,
             animated_background: true,
         }
@@ -70,11 +73,14 @@ impl Settings {
     pub fn paths(&self) -> Paths {
         // A NETHERNODE_HOME override always wins (tests, portable installs).
         if let Some(home) = std::env::var_os("NETHERNODE_HOME") {
-            let paths = Paths::new(home);
-            return match &self.instances_dir {
-                Some(dir) => paths.with_instances_dir(dir),
-                None => paths,
-            };
+            let mut paths = Paths::new(home);
+            if let Some(dir) = &self.instances_dir {
+                paths = paths.with_instances_dir(dir);
+            }
+            if let Some(dir) = &self.servers_dir {
+                paths = paths.with_servers_dir(dir);
+            }
+            return paths;
         }
         Paths::from_settings(self)
     }

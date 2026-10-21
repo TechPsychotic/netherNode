@@ -15,7 +15,7 @@ use crate::background::Portal;
 use crate::theme;
 use crate::{
     App, EditForm, FolderKind, Load, LoaderPick, Message, ModsTab, ModsView, NewInstanceForm,
-    PacksView, Screen, SettingsForm, VersionFilter,
+    NewServerForm, PacksView, Screen, ServerField, ServersView, SettingsForm, VersionFilter,
 };
 
 /// Obsidian block size in the background, logical px. Content sits inside this frame.
@@ -90,6 +90,8 @@ impl App {
             Screen::Mods(view) => self.mods_screen(view),
             Screen::Modpacks(view) => self.modpacks_screen(view),
             Screen::Settings(form) => self.dialog(self.settings_form(form)),
+            Screen::Servers(view) => self.servers_screen(view),
+            Screen::NewServer(form) => self.dialog(self.new_server_form(form)),
             Screen::JoinFriend { code, error } => {
                 self.dialog(join_friend_form(code, error.as_deref()))
             }
@@ -152,6 +154,7 @@ impl App {
             .spacing(8)
             .align_y(Alignment::Center);
         right = right
+            .push(small_button("Servers").on_press(Message::ShowServers))
             .push(small_button("Join friend").on_press(Message::ShowJoinFriend))
             .push(small_button("Modpacks").on_press(Message::ShowModpacks))
             .push(small_button("Accounts").on_press(Message::ShowAccounts))
@@ -862,6 +865,387 @@ impl App {
         .into()
     }
 
+    fn servers_screen<'a>(&'a self, view: &'a ServersView) -> Element<'a, Message> {
+        use nethernode_core::server::ServerKind;
+        let kind_color = |k: ServerKind| match k {
+            ServerKind::Vanilla => theme::SUCCESS,
+            ServerKind::Fabric => Color::from_rgb8(0xe8, 0xc9, 0x9b),
+            ServerKind::Paper => Color::from_rgb8(0x7f, 0xb6, 0xff),
+        };
+        let status = |name: &str| -> (&'static str, Color) {
+            if self.server_jobs.contains_key(name) {
+                return ("Downloading", theme::WARNING);
+            }
+            match self.server_runs.get(name) {
+                Some(r) if r.stop.is_none() => ("Stopping", theme::WARNING),
+                Some(r) if r.ready => ("Running", theme::SUCCESS),
+                Some(_) => ("Starting", theme::WARNING),
+                None => ("Stopped", theme::MUTED),
+            }
+        };
+
+        let mut list = column![].spacing(8);
+        for srv in &self.servers {
+            let selected = view.selected.as_ref() == Some(&srv.name);
+            let (label, color) = status(&srv.name);
+            list = list.push(
+                button(
+                    column![
+                        row![
+                            text(&srv.name).size(15).font(BOLD).width(Length::Fill),
+                            text(label).size(11).color(color)
+                        ]
+                        .align_y(Alignment::Center),
+                        row![
+                            chip(srv.kind.name(), kind_color(srv.kind)),
+                            text(format!("Minecraft {}", srv.minecraft))
+                                .size(12)
+                                .color(theme::MUTED)
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    ]
+                    .spacing(6),
+                )
+                .width(Length::Fill)
+                .padding([10, 12])
+                .style(move |t, st| {
+                    let mut style = theme::glass_button(t, st);
+                    if selected {
+                        style.border.color = theme::VIOLET_BRIGHT;
+                    }
+                    style
+                })
+                .on_press(Message::SelectServer(srv.name.clone())),
+            );
+        }
+        let left = container(
+            column![
+                row![
+                    text("Servers").size(18).font(BOLD),
+                    space::horizontal(),
+                    button(text("+ New server").size(13).font(BOLD))
+                        .padding([6, 12])
+                        .style(theme::play)
+                        .on_press(Message::ShowNewServer),
+                ]
+                .align_y(Alignment::Center),
+                text("Hosted on this PC. Friends join with Invite friends (no port forwarding).")
+                    .size(12)
+                    .color(theme::MUTED),
+                scrollable(list).style(theme::scroll).height(Length::Fill),
+                button(text("← Back to instances").size(13))
+                    .style(theme::link)
+                    .on_press(Message::ShowHome),
+            ]
+            .spacing(12),
+        )
+        .padding(18)
+        .width(Length::FillPortion(4))
+        .height(Length::Fill)
+        .style(theme::glass);
+
+        let Some(srv) = view
+            .selected
+            .as_ref()
+            .and_then(|n| self.servers.iter().find(|s| &s.name == n))
+        else {
+            let empty = container(
+                column![
+                    text("Host your own server").size(22).font(BOLD),
+                    text("Pick a Minecraft version and Vanilla, Fabric (mods) or Paper (plugins). It runs on this PC, and friends can join any time it's on, even when you're not playing.")
+                        .color(theme::MUTED)
+                        .center(),
+                    button(text("+ New server").size(16).font(BOLD))
+                        .padding([12, 22])
+                        .style(theme::play)
+                        .on_press(Message::ShowNewServer),
+                ]
+                .spacing(14)
+                .align_x(Alignment::Center)
+                .max_width(460),
+            )
+            .center(Length::Fill)
+            .width(Length::FillPortion(7))
+            .style(theme::glass);
+            return row![left, empty].spacing(16).height(Length::Fill).into();
+        };
+
+        let name = srv.name.clone();
+        let run = self.server_runs.get(&name);
+        let ready = run.is_some_and(|r| r.ready);
+        let installing = self.server_jobs.contains_key(&name);
+        let eula = nethernode_core::server::eula_accepted(&self.paths, srv);
+        let (label, color) = status(&name);
+        let header = column![
+            text(&srv.name).size(24).font(BOLD),
+            row![
+                chip(srv.kind.name(), kind_color(srv.kind)),
+                chip(format!("Minecraft {}", srv.minecraft), theme::VIOLET_BRIGHT),
+                chip(format!("Port {}", srv.port), theme::MUTED),
+                chip(label, color),
+            ]
+            .spacing(6),
+        ]
+        .spacing(6);
+
+        let main_button = match run {
+            Some(r) if r.stop.is_none() => button(text("Stopping…").size(15).font(BOLD))
+                .padding([10, 22])
+                .style(theme::stop),
+            Some(_) => button(text("■  Stop").size(15).font(BOLD))
+                .padding([10, 22])
+                .style(theme::stop)
+                .on_press(Message::StopServer(name.clone())),
+            None => button(text("▶  Start").size(15).font(BOLD))
+                .padding([10, 22])
+                .style(theme::play)
+                .on_press_maybe((eula && !installing).then(|| Message::StartServer(name.clone()))),
+        };
+        let deleting = view.confirm_delete;
+        let actions = row![
+            main_button,
+            small_button("Play on it")
+                .on_press_maybe(ready.then(|| Message::PlayOnServer(name.clone()))),
+            small_button("Invite friends").on_press_maybe(
+                (ready && self.host_share.is_none()).then(|| Message::InviteServer(name.clone()))
+            ),
+            small_button("Settings").on_press(Message::EditServerSettings),
+            small_button("Folder").on_press(Message::OpenFolder(srv.dir(&self.paths))),
+            button(text(if deleting { "Really delete?" } else { "Delete" }).size(14))
+                .padding([8, 14])
+                .style(theme::danger_button)
+                .on_press_maybe(run.is_none().then(|| Message::DeleteServer(name.clone()))),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .wrap()
+        .vertical_spacing(8);
+
+        let mut body = column![header, actions].spacing(14);
+        if !eula {
+            body = body.push(
+                container(
+                    row![
+                        text("To start this server you need to accept the Minecraft EULA.")
+                            .size(13)
+                            .width(Length::Fill),
+                        small_button("Read it")
+                            .on_press(Message::OpenUrl(nethernode_core::server::EULA_URL.into())),
+                        button(text("I accept the EULA").size(13).font(BOLD))
+                            .padding([8, 14])
+                            .style(theme::play)
+                            .on_press(Message::AcceptEula(name.clone())),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding([10, 14])
+                .style(theme::notice(false)),
+            );
+        }
+        let progress = self
+            .server_jobs
+            .get(&name)
+            .map(|j| (j.label.clone(), j.stage.clone()))
+            .or_else(|| {
+                run.and_then(|r| r.stage.clone())
+                    .map(|s| ("Preparing Java".to_string(), Some(s)))
+            });
+        if let Some((label, stage)) = progress {
+            let (detail, done, total) = match stage {
+                Some((stage, done, total)) => {
+                    (format!("{label}: {stage} {done}/{total}"), done, total)
+                }
+                None => (format!("{label}…"), 0, 1),
+            };
+            body = body.push(
+                column![
+                    text(detail).size(13).color(theme::MUTED),
+                    progress_bar(0.0..=total.max(1) as f32, done as f32)
+                        .girth(8)
+                        .style(theme::progress),
+                ]
+                .spacing(6),
+            );
+        }
+        if let Some(form) = &view.settings {
+            body = body.push(server_settings(form, run.is_some()));
+        }
+        if ready {
+            body = body.push(
+                text(format!(
+                    "Players on this PC can also join with Direct Connect to localhost:{}.",
+                    srv.port
+                ))
+                .size(12)
+                .color(theme::MUTED),
+            );
+        }
+
+        let console: Element<'_, Message> = match run.map(|r| &r.log) {
+            Some(lines) if !lines.is_empty() => {
+                let shown = lines.len().min(LOG_VISIBLE);
+                let column = column(
+                    lines
+                        .iter()
+                        .skip(lines.len() - shown)
+                        .map(|l| text(l).size(12).font(MONO).into()),
+                )
+                .spacing(2);
+                container(
+                    scrollable(container(column).padding(12).width(Length::Fill))
+                        .anchor_bottom()
+                        .style(theme::scroll)
+                        .height(Length::Fill),
+                )
+                .style(theme::console)
+                .height(Length::Fill)
+                .into()
+            }
+            _ => container(
+                column![
+                    text("The server console appears here when it runs.").color(theme::MUTED),
+                    row![
+                        small_button("Import world folder…")
+                            .on_press(Message::ServerImportWorld(name.clone(), false)),
+                        small_button("Import world .zip…")
+                            .on_press(Message::ServerImportWorld(name.clone(), true)),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(10)
+                .align_x(Alignment::Center),
+            )
+            .center(Length::Fill)
+            .style(theme::console)
+            .into(),
+        };
+        body = body.push(console);
+        if run.is_some() {
+            body = body.push(
+                row![
+                    text_input(
+                        "Server command, e.g. op Steve, time set day, say hi",
+                        &view.command
+                    )
+                    .on_input(Message::ServerCommandInput)
+                    .on_submit(Message::SendServerCommand)
+                    .style(theme::input)
+                    .font(MONO)
+                    .padding(8),
+                    small_button("Send").on_press(Message::SendServerCommand),
+                ]
+                .spacing(8),
+            );
+        }
+        let right = container(body)
+            .padding(18)
+            .width(Length::FillPortion(7))
+            .height(Length::Fill)
+            .style(theme::glass);
+        row![left, right].spacing(16).height(Length::Fill).into()
+    }
+
+    fn new_server_form<'a>(&'a self, form: &'a NewServerForm) -> Element<'a, Message> {
+        use nethernode_core::server::ServerKind;
+        let choices = self.version_choices(VersionFilter::Releases);
+        let selected = form
+            .version
+            .as_ref()
+            .and_then(|v| choices.iter().find(|c| &c.id == v).cloned());
+        let mc = form.version.clone().unwrap_or_default();
+        let unavailable = |k: ServerKind| {
+            matches!(
+                self.server_support.get(&mc).and_then(|m| m.get(&k)),
+                Some(Load::Ready(false))
+            )
+        };
+        let kinds = ServerKind::ALL.into_iter().map(|k| {
+            let disabled = unavailable(k) && form.kind != k;
+            button(text(k.name()).size(14))
+                .padding([8, 14])
+                .style(theme::segment(form.kind == k))
+                .on_press_maybe((!disabled).then_some(Message::NewServerKind(k)))
+                .into()
+        });
+        let about = match form.kind {
+            ServerKind::Vanilla => "The official server, exactly like the game.",
+            ServerKind::Fabric => "Fabric mods on the server (friends may need the same mods).",
+            ServerKind::Paper => {
+                "Faster, and supports plugins (Bukkit/Paper). Vanilla clients join as normal."
+            }
+        };
+        let missing: Vec<&str> = ServerKind::ALL
+            .into_iter()
+            .filter(|k| unavailable(*k))
+            .map(|k| k.name())
+            .collect();
+        let mut kind_section = column![
+            text("Server type").size(13).color(theme::MUTED),
+            row(kinds).spacing(6)
+        ]
+        .spacing(8);
+        if !missing.is_empty() {
+            kind_section = kind_section.push(
+                text(format!(
+                    "Not released yet for Minecraft {mc}: {}",
+                    missing.join(", ")
+                ))
+                .size(12)
+                .color(theme::WARNING),
+            );
+        }
+        kind_section = kind_section.push(text(about).size(12).color(theme::MUTED));
+        let can_create = form.version.is_some() && form.eula && !unavailable(form.kind);
+        column![
+            row![
+                text("New server").size(26).font(BOLD),
+                space::horizontal(),
+                small_button("Cancel").on_press(Message::ShowServers),
+                button(text("Create").size(15).font(BOLD))
+                    .padding([10, 26])
+                    .style(theme::play)
+                    .on_press_maybe(can_create.then_some(Message::CreateServer)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+            field(
+                "Name",
+                text_input("e.g. Survival with friends", &form.name)
+                    .on_input(Message::NewServerName)
+                    .style(theme::input)
+                    .padding(10),
+            ),
+            field(
+                "Minecraft version",
+                pick_list(choices, selected, |c: crate::VersionChoice| Message::NewServerVersion(c.id))
+                    .placeholder("Choose a version")
+                    .style(theme::picker)
+                    .padding(10)
+                    .width(Length::Fill),
+            ),
+            kind_section,
+            column![
+                checkbox(form.eula).label("I accept the Minecraft EULA").on_toggle(Message::NewServerEula),
+                row![
+                    text("Running Mojang's server software requires it.").size(12).color(theme::MUTED),
+                    button(text("Read the EULA").size(12))
+                        .style(theme::link)
+                        .on_press(Message::OpenUrl(nethernode_core::server::EULA_URL.into())),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(6),
+            text("It runs in offline mode so offline accounts can join. Friends still need your OK when they connect with a code, and you can turn on a whitelist in its settings.")
+                .size(12)
+                .color(theme::MUTED),
+        ]
+        .spacing(18)
+        .into()
+    }
+
     /// Banners for an active share (host) and a joined friend's world. Shown on every
     /// screen, since join requests need an answer wherever the player is.
     fn share_banners(&self) -> Vec<Element<'_, Message>> {
@@ -1048,6 +1432,26 @@ impl App {
                     .on_press_maybe((!form.busy).then_some(Message::SettingsResetInstances)),
             );
         }
+        let servers_path = form
+            .servers_dir
+            .clone()
+            .unwrap_or_else(|| form.data_dir.join("servers"))
+            .display()
+            .to_string();
+        let mut servers = column![folder(
+            "Servers",
+            servers_path,
+            FolderKind::Servers,
+            "Servers hosted on this PC, with their worlds.",
+        )]
+        .spacing(6);
+        if form.servers_dir.is_some() {
+            servers = servers.push(
+                button(text("Keep them inside the game files folder").size(12))
+                    .style(theme::link)
+                    .on_press_maybe((!form.busy).then_some(Message::SettingsResetServers)),
+            );
+        }
         let renderers = [
             (Renderer::Auto, "Automatic"),
             (Renderer::Gpu, "GPU (animated portal)"),
@@ -1081,6 +1485,7 @@ impl App {
                 "Versions, libraries, assets and Java runtimes, shared by all instances.",
             ),
             instances,
+            servers,
             checkbox(form.move_files)
                 .label("Move my existing files to the new folders")
                 .on_toggle_maybe((!form.busy).then_some(Message::SettingsMoveFiles)),
@@ -1739,4 +2144,106 @@ fn join_friend_form<'a>(code: &'a str, error: Option<&'a str>) -> Element<'a, Me
             .color(theme::MUTED),
     )
     .into()
+}
+
+fn server_settings<'a>(form: &'a crate::ServerSettingsForm, running: bool) -> Element<'a, Message> {
+    let input = |label: &'a str,
+                 value: &'a str,
+                 which: ServerField,
+                 hint: &'a str|
+     -> Element<'a, Message> {
+        field(
+            label,
+            text_input(hint, value)
+                .on_input(move |v| Message::ServerSettingsInput(which, v))
+                .style(theme::input)
+                .padding(8),
+        )
+    };
+    let choice = |label: &'a str,
+                  options: &'static [&'static str],
+                  value: &'a str,
+                  which: ServerField|
+     -> Element<'a, Message> {
+        field(
+            label,
+            row(options.iter().map(|o| {
+                button(text(*o).size(13))
+                    .padding([6, 12])
+                    .style(theme::segment(value == *o))
+                    .on_press(Message::ServerSettingsInput(which, o.to_string()))
+                    .into()
+            }))
+            .spacing(6)
+            .wrap()
+            .vertical_spacing(6),
+        )
+    };
+    let mut col = column![
+        row![
+            text("Server settings").size(16).font(BOLD),
+            space::horizontal(),
+            button(text("Save").size(14).font(BOLD))
+                .padding([8, 18])
+                .style(theme::play)
+                .on_press(Message::SaveServerSettings),
+        ]
+        .align_y(Alignment::Center),
+        input(
+            "Message in the server list (MOTD)",
+            &form.motd,
+            ServerField::Motd,
+            "A Minecraft Server"
+        ),
+        row![
+            input(
+                "Max players",
+                &form.max_players,
+                ServerField::MaxPlayers,
+                "10"
+            ),
+            input(
+                "Memory limit in MB (empty = automatic)",
+                &form.max_memory,
+                ServerField::MaxMemory,
+                "automatic"
+            ),
+        ]
+        .spacing(10),
+        choice(
+            "Game mode",
+            &["survival", "creative", "adventure", "spectator"],
+            &form.gamemode,
+            ServerField::Gamemode
+        ),
+        choice(
+            "Difficulty",
+            &["peaceful", "easy", "normal", "hard"],
+            &form.difficulty,
+            ServerField::Difficulty
+        ),
+        checkbox(form.pvp)
+            .label("Players can hurt each other (PvP)")
+            .on_toggle(|on| Message::ServerSettingsToggle(ServerField::Pvp, on)),
+        checkbox(form.whitelist_on)
+            .label("Only allow these players (whitelist)")
+            .on_toggle(|on| Message::ServerSettingsToggle(ServerField::WhitelistOn, on)),
+    ]
+    .spacing(12);
+    if form.whitelist_on {
+        col = col.push(input(
+            "Allowed names (comma separated)",
+            &form.whitelist,
+            ServerField::Whitelist,
+            "Steve, Alex",
+        ));
+    }
+    if running {
+        col = col.push(
+            text("Changes apply the next time the server starts.")
+                .size(12)
+                .color(theme::WARNING),
+        );
+    }
+    container(col).padding(14).style(theme::row_item).into()
 }

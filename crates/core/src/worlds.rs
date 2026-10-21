@@ -92,7 +92,12 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
 /// Import a world from a folder (the one containing `level.dat`) or a `.zip` of one.
 /// Returns the folder name it got in `saves/`.
 pub fn import(paths: &Paths, instance: &Instance, source: &Path) -> Result<String> {
-    let saves = saves_dir(paths, instance);
+    import_into(&saves_dir(paths, instance), source)
+}
+
+/// Like [`import`], into any folder of worlds.
+pub fn import_into(saves: &Path, source: &Path) -> Result<String> {
+    let saves = saves.to_path_buf();
     std::fs::create_dir_all(&saves)?;
     let is_zip = source
         .extension()

@@ -102,6 +102,8 @@ pub struct AssetIndexRef {
 #[derive(Debug, Clone, Deserialize)]
 pub struct VersionDownloads {
     pub client: Option<Artifact>,
+    /// The dedicated server jar (vanilla versions from 1.2.5 on).
+    pub server: Option<Artifact>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

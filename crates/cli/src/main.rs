@@ -56,6 +56,9 @@ enum Command {
     /// Play a LAN world with friends over the internet (no port forwarding)
     #[command(subcommand)]
     Share(ShareCmd),
+    /// Minecraft servers hosted on this PC
+    #[command(subcommand)]
+    Server(ServerCmd),
     /// Download (if needed) and start an instance
     Launch {
         instance: String,
@@ -182,6 +185,33 @@ enum ModsCmd {
     Remove {
         instance: String,
         file: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerCmd {
+    /// Create (and download) a server: vanilla, fabric or paper
+    Create {
+        name: String,
+        minecraft: String,
+        #[arg(long, default_value = "vanilla")]
+        kind: String,
+        /// You accept the Minecraft EULA (https://aka.ms/MinecraftEULA); required to start it
+        #[arg(long)]
+        accept_eula: bool,
+    },
+    List,
+    /// Run a server in this terminal (type commands like `op Steve`; Ctrl+C saves and stops)
+    Start {
+        name: String,
+        /// Also share it with friends over the internet
+        #[arg(long)]
+        share: bool,
+    },
+    Delete {
+        name: String,
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -540,6 +570,122 @@ async fn main() -> Result<()> {
                 ModpackCmd::Install { project } => {
                     let i = modpack::install(&http, &paths, &project, &progress_bars()).await?;
                     report(&i);
+                }
+            }
+        }
+
+        Command::Server(cmd) => {
+            use nethernode_core::server::{self, Server, ServerKind};
+            let http = download::client();
+            match cmd {
+                ServerCmd::Create {
+                    name,
+                    minecraft,
+                    kind,
+                    accept_eula,
+                } => {
+                    let kind = ServerKind::ALL
+                        .into_iter()
+                        .find(|k| k.name().eq_ignore_ascii_case(&kind))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("unknown kind '{kind}' (vanilla, fabric, paper)")
+                        })?;
+                    let minecraft = resolve_version_alias(&paths, &minecraft).await?;
+                    let mut created = Server::create(&paths, &name, &minecraft, kind)?;
+                    if let Err(e) =
+                        server::install(&http, &paths, &mut created, &progress_bars()).await
+                    {
+                        let _ = Server::delete(&paths, &name);
+                        return Err(e.into());
+                    }
+                    if accept_eula {
+                        server::accept_eula(&paths, &created)?;
+                    }
+                    println!(
+                        "created {} server '{}' for Minecraft {minecraft} on port {}",
+                        kind.name(),
+                        created.name,
+                        created.port
+                    );
+                    if !accept_eula {
+                        println!(
+                            "before starting it, read {} and re-create with --accept-eula, or accept it in the app",
+                            server::EULA_URL
+                        );
+                    }
+                }
+                ServerCmd::List => {
+                    for s in Server::list(&paths) {
+                        println!(
+                            "{:<24} {:<8} {:<10} port {}",
+                            s.name,
+                            s.kind.name(),
+                            s.minecraft,
+                            s.port
+                        );
+                    }
+                }
+                ServerCmd::Delete { name, yes } => {
+                    if !yes {
+                        bail!("this deletes '{name}' including its world; re-run with --yes");
+                    }
+                    Server::delete(&paths, &name)?;
+                    println!("deleted {name}");
+                }
+                ServerCmd::Start { name, share } => {
+                    let srv = Server::load(&paths, &name)?;
+                    let cmd = server::command(&http, &paths, &srv, &progress_bars()).await?;
+                    println!(
+                        "starting {} on port {} with up to {} MB (Ctrl+C saves and stops)",
+                        srv.name, srv.port, cmd.heap_mb
+                    );
+                    let (tx, rx) = futures::channel::mpsc::unbounded();
+                    // Lines typed here go to the server console.
+                    std::thread::spawn(move || {
+                        for line in std::io::stdin().lines().map_while(|l| l.ok()) {
+                            if tx.unbounded_send(line).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    let port = srv.port;
+                    let sharing = async move {
+                        if !share {
+                            return std::future::pending::<()>().await;
+                        }
+                        let result = share::host(
+                            port,
+                            |event| match event {
+                                share::HostEvent::Ready(code) => {
+                                    println!("\nfriends can join with this code:\n  {code}\n")
+                                }
+                                share::HostEvent::Request { friend, reply } => {
+                                    println!("{friend} wants to join; letting them in (CLI)");
+                                    let _ = reply.send(true);
+                                }
+                                share::HostEvent::Joined { friend } => {
+                                    println!("{friend} connected")
+                                }
+                                share::HostEvent::Left { friend } => {
+                                    println!("{friend} disconnected")
+                                }
+                            },
+                            std::future::pending::<()>(),
+                        )
+                        .await;
+                        if let Err(e) = result {
+                            eprintln!("sharing failed: {e}");
+                        }
+                        std::future::pending::<()>().await
+                    };
+                    let run = server::run(&cmd, |line| println!("{line}"), rx, async {
+                        let _ = shutdown_signal().await;
+                    });
+                    let status = tokio::select! {
+                        status = run => status?,
+                        () = sharing => unreachable!(),
+                    };
+                    println!("server stopped ({status})");
                 }
             }
         }

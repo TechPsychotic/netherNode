@@ -31,6 +31,12 @@ Invite friends / Join friend tunnel a LAN world over the internet with iroh: QUI
 
 **Next:** self-hosted relay option (for example a small server in India) to cut relay latency; shorter join codes; show "direct" vs "relay" in the banner.
 
+## Servers on this PC (done)
+
+Vanilla, Fabric and Paper servers with a console, graceful stop (saves the world), settings, an offline-UUID whitelist, world import, "Play on it" (quick-join) and Invite friends through the same tunnel. Offline mode, with an EULA checkbox (never accepted silently). Desktop notifications for join requests (plus a taskbar flash) and server ready. Verified: each kind started, pinged through the tunnel, a real client joined (Vanilla, Paper) and stopped cleanly.
+
+**Next:** Forge/NeoForge servers, mods/plugins browser for servers, automatic world backups, an "AuthMe" helper for Paper, and start-on-launch.
+
 ## What's left
 
 ### 1. Before the first public release (must have)

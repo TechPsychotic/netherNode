@@ -18,6 +18,8 @@ pub struct Paths {
     pub root: PathBuf,
     /// Instances, including their worlds. Normally `<root>/instances`; can be moved.
     instances_dir: PathBuf,
+    /// Servers hosted on this PC, with their worlds. Normally `<root>/servers`.
+    servers_dir: PathBuf,
 }
 
 impl Paths {
@@ -25,6 +27,7 @@ impl Paths {
         let root = root.into();
         Self {
             instances_dir: root.join("instances"),
+            servers_dir: root.join("servers"),
             root,
         }
     }
@@ -37,11 +40,23 @@ impl Paths {
 
     /// The folders chosen in [`crate::settings::Settings`] (or the defaults).
     pub fn from_settings(settings: &crate::settings::Settings) -> Self {
-        let paths = Self::new(settings.data_dir.clone().unwrap_or_else(Self::default_root));
-        match &settings.instances_dir {
-            Some(dir) => paths.with_instances_dir(dir),
-            None => paths,
+        let mut paths = Self::new(settings.data_dir.clone().unwrap_or_else(Self::default_root));
+        if let Some(dir) = &settings.instances_dir {
+            paths = paths.with_instances_dir(dir);
         }
+        if let Some(dir) = &settings.servers_dir {
+            paths = paths.with_servers_dir(dir);
+        }
+        paths
+    }
+
+    pub fn with_servers_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.servers_dir = dir.into();
+        self
+    }
+
+    pub fn servers(&self) -> PathBuf {
+        self.servers_dir.clone()
     }
 
     /// `$NETHERNODE_HOME`, else the platform data dir (e.g. `~/.local/share/nethernode`).

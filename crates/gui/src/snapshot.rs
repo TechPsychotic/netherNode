@@ -117,6 +117,39 @@ pub fn update(app: &mut App, step: Step) -> Task<Message> {
                     send(app, Message::StartJoin);
                     12_000
                 }
+                "servers" => {
+                    send(app, Message::ShowServers);
+                    if let Ok(server) = std::env::var("NETHERNODE_SNAPSHOT_SERVER") {
+                        send(app, Message::SelectServer(server));
+                    }
+                    1000
+                }
+                "server-start" => {
+                    if let Ok(server) = std::env::var("NETHERNODE_SNAPSHOT_SERVER") {
+                        send(app, Message::StartServer(server));
+                    }
+                    45_000
+                }
+                "server-invite" => {
+                    if let Ok(server) = std::env::var("NETHERNODE_SNAPSHOT_SERVER") {
+                        send(app, Message::InviteServer(server));
+                    }
+                    15_000
+                }
+                "server-stop" => {
+                    if let Ok(server) = std::env::var("NETHERNODE_SNAPSHOT_SERVER") {
+                        send(app, Message::StopServer(server));
+                    }
+                    45_000
+                }
+                "server-settings" => {
+                    send(app, Message::EditServerSettings);
+                    800
+                }
+                "new-server" => {
+                    send(app, Message::ShowNewServer);
+                    4000
+                }
                 "settings" => {
                     send(app, Message::ShowSettings);
                     800

@@ -21,6 +21,8 @@
 - **Mods from Modrinth.** Search only shows mods compatible with the instance. Dependencies install automatically, and mods can be turned on and off or added by drag & drop.
 - **Modpacks.** Install from Modrinth or import `.mrpack` files. Each pack becomes its own instance.
 - **Play with friends over the internet.** Open your world to LAN, click *Invite friends*, and send the code. Friends click *Join friend* and see your world in Minecraft's LAN list. No port forwarding, works behind CGNAT, end-to-end encrypted.
+- **Host a server on your PC.** Vanilla, Fabric (mods) or Paper (plugins), with a live console, settings and whitelist. Friends join any time it's on, through *Invite friends*, even when you're not playing.
+- **Desktop notifications** when a friend wants in or your server is ready, so you notice even in fullscreen.
 - **Bring your worlds.** Import world folders or `.zip` backups when creating or editing an instance.
 - **Your folders.** Move the game files and the instances & worlds to any drive from Settings.
 - **Light on low-end PCs.** Game memory is sized to your RAM and to what's free right now. Low-RAM machines get lighter settings and a lighter launcher.
