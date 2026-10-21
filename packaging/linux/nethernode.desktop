@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=netherNode
+GenericName=Minecraft Launcher
+Comment=Offline Minecraft launcher
+Exec=nethernode-gui
+Icon=nethernode
+Terminal=false
+Categories=Game;
+Keywords=minecraft;launcher;game;
+StartupWMClass=nethernode

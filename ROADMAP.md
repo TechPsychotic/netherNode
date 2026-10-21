@@ -122,7 +122,9 @@ Every loader produces a version JSON that `inheritsFrom` the vanilla one. Write 
 ## Phase 5: GUI
 
 **Done (first version):** instance sidebar, Play/Stop, live game log, download progress, new-instance form (searchable versions, snapshots, low-end preset), instance settings (memory, Java, JVM args), accounts screen, open folder, two-click delete. Closing the window stops running games. Debug builds can screenshot every screen with `NETHERNODE_SNAPSHOT=<dir>`.
-**Still to do:** news panel, crash-report detection, icons/branding, a macOS .app bundle and a Windows icon/manifest.
+**Crash detection (done):** after a failed run, netherNode reads the new Minecraft crash report, a JVM `hs_err_pid*.log`, or the last 200 output lines. It shows the cause and a fix for known problems: out of memory, a bad heap setting, Java too old, missing xrandr, OpenGL/driver issues, graphics-driver JVM crashes and broken native libraries. A custom Java that is too old is rejected before launch. The GUI shows a crash card (open report, copy details); the CLI prints the same information.
+**Icons (done):** `assets/icon.svg` and `icon-small.svg` (16–32 px), turned into PNGs, `.ico` and `.icns` by `assets/build-icons.sh`. Used for the window icon, the sidebar logo, the Windows .exe resource (`crates/gui/build.rs`), the Linux `.desktop` file and `packaging/linux/install.sh`, and the macOS `.app` (`packaging/macos/make-app.sh`, built in CI).
+**Still to do:** news panel, a Windows installer, macOS notarization (needs an Apple Developer ID).
 
 
 - **Main window:** instance grid with icons, Play button, account switcher, news/log panel.

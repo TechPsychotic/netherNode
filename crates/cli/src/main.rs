@@ -257,15 +257,27 @@ async fn main() -> Result<()> {
                 let _ = signal.set(shutdown_signal().await);
             })
             .await?;
-            let status = match outcome {
-                launch::RunOutcome::Exited(status) => status,
+            match outcome {
+                launch::RunOutcome::Exited { crash: None, .. } => {}
+                launch::RunOutcome::Exited {
+                    crash: Some(crash), ..
+                } => {
+                    eprintln!("\n{}", crash.title);
+                    if let Some(cause) = &crash.cause {
+                        eprintln!("  cause:  {cause}");
+                    }
+                    if let Some(report) = &crash.report {
+                        eprintln!("  report: {}", report.display());
+                    }
+                    if let Some(hint) = &crash.hint {
+                        eprintln!("\n{hint}");
+                    }
+                    std::process::exit(crash.exit_code.filter(|c| *c != 0).unwrap_or(1));
+                }
                 launch::RunOutcome::Stopped => {
                     let signal = signal.get().copied().unwrap_or("signal");
                     bail!("received {signal}, game stopped");
                 }
-            };
-            if !status.success() {
-                bail!("game exited with {status}; see {}/logs", cmd.cwd.display());
             }
         }
     }

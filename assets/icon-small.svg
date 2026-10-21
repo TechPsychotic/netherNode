@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Simplified netherNode icon for 16 and 32 px: the portal fills the square, bolder N. -->
+  <defs>
+    <linearGradient id="portal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff9a4a"/>
+      <stop offset="0.5" stop-color="#e8613c"/>
+      <stop offset="1" stop-color="#8b3fe0"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="#3b2c48"/>
+  <rect x="4" y="3" width="24" height="26" rx="3" fill="url(#portal)"/>
+  <path d="M10.5 23 V9 L21.5 23 V9" fill="none" stroke="#fff7f0" stroke-width="3.4"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

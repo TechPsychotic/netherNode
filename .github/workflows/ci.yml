@@ -26,6 +26,13 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build --release
+      - if: runner.os == 'macOS'
+        run: packaging/macos/make-app.sh
+      - if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: netherNode-app-${{ runner.arch }}
+          path: target/release/netherNode.app
       - uses: actions/upload-artifact@v4
         with:
           name: nethernode-${{ runner.os }}-${{ runner.arch }}

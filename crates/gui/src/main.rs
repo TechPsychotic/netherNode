@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod game;
+mod icon;
 #[cfg(debug_assertions)]
 mod snapshot;
 mod theme;
@@ -16,6 +17,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Font, Length, Subscription, Task, window};
 use nethernode_core::account::Accounts;
+use nethernode_core::crash::CrashInfo;
 use nethernode_core::download;
 use nethernode_core::instance::Instance;
 use nethernode_core::memory::SystemMemory;
@@ -38,8 +40,20 @@ pub fn main() -> iced::Result {
         .title(App::title)
         .theme(|_: &App| theme::theme())
         .subscription(App::subscription)
-        .exit_on_close_request(false)
-        .window_size((1040.0, 680.0))
+        .window(window::Settings {
+            size: iced::Size::new(1040.0, 680.0),
+            min_size: Some(iced::Size::new(760.0, 480.0)),
+            icon: icon::window_icon(),
+            // We stop running games before exiting; see Message::CloseRequested.
+            exit_on_close_request: false,
+            #[cfg(target_os = "linux")]
+            platform_specific: window::settings::PlatformSpecific {
+                // Must match the .desktop file name so docks show our icon on Wayland.
+                application_id: "nethernode".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
         .run()
 }
 
@@ -59,6 +73,9 @@ struct App {
     /// The window was closed while games were running; exit once they have stopped.
     closing: bool,
     memory: SystemMemory,
+    /// The last crash of each instance, shown until dismissed or the next launch.
+    crashes: HashMap<String, CrashInfo>,
+    logo: iced::widget::image::Handle,
 }
 
 /// A launch in progress: downloading, then playing.
@@ -99,6 +116,9 @@ enum Message {
     Game(String, game::Event),
     VersionsLoaded(Result<Vec<ManifestEntry>, String>),
     OpenFolder(PathBuf),
+    OpenFile(PathBuf),
+    CopyCrash(String),
+    DismissCrash(String),
     Delete(String),
     DismissNotice,
     ShowHome,
@@ -141,6 +161,8 @@ impl App {
             notice: None,
             confirm_delete: None,
             closing: false,
+            crashes: HashMap::new(),
+            logo: icon::logo(),
             memory: SystemMemory::current(),
             paths: paths.clone(),
         };
@@ -238,6 +260,7 @@ impl App {
                 );
                 let log = self.logs.entry(name.clone()).or_default();
                 log.clear();
+                self.crashes.remove(&name);
                 log.push_back(format!(
                     "Launching {} as {}…",
                     instance.version, account.name
@@ -285,13 +308,17 @@ impl App {
                         }
                     }
                     game::Event::Log(line) => push(line),
-                    game::Event::Finished(result) => {
+                    game::Event::Finished(ended) => {
                         self.runs.remove(&name);
-                        match result {
-                            Ok(status) => push(status),
-                            Err(e) => {
+                        match ended {
+                            game::Ended::Ok(status) => push(status),
+                            game::Ended::Failed(e) => {
                                 push(format!("Error: {e}"));
                                 self.notice = Some((true, format!("{name}: {e}")));
+                            }
+                            game::Ended::Crashed(crash) => {
+                                push(crash.title.clone());
+                                self.crashes.insert(name, crash);
                             }
                         }
                         if self.closing && self.runs.is_empty() {
@@ -315,7 +342,19 @@ impl App {
                 Err(e) => self.error(format!("Couldn't load the version list: {e}")),
             },
 
-            Message::OpenFolder(path) => open_folder(&path),
+            Message::OpenFolder(path) => {
+                let _ = std::fs::create_dir_all(&path);
+                open_path(&path);
+            }
+            Message::OpenFile(path) => open_path(&path),
+            Message::CopyCrash(name) => {
+                if let Some(crash) = self.crashes.get(&name) {
+                    return iced::clipboard::write(crash_text(&name, crash));
+                }
+            }
+            Message::DismissCrash(name) => {
+                self.crashes.remove(&name);
+            }
 
             Message::Delete(name) => {
                 if self.confirm_delete.as_ref() != Some(&name) {
@@ -610,7 +649,12 @@ impl App {
 
         container(
             column![
-                text("netherNode").size(22).color(theme::ACCENT),
+                row![
+                    iced::widget::image(self.logo.clone()).width(30).height(30),
+                    text("netherNode").size(22).color(theme::ACCENT),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
                 text("Offline Minecraft launcher")
                     .size(12)
                     .color(theme::MUTED),
@@ -718,6 +762,9 @@ impl App {
         .style(theme::card);
 
         let mut body = column![header].spacing(16);
+        if let Some(crash) = self.crashes.get(&instance.name) {
+            body = body.push(view_crash(&instance.name, crash));
+        }
         if let Some((stage, done, total)) = run.and_then(|r| r.stage.as_ref()) {
             body = body.push(
                 column![
@@ -955,8 +1002,8 @@ fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<
         .into()
 }
 
-fn open_folder(path: &Path) {
-    let _ = std::fs::create_dir_all(path);
+/// Open a file or folder with the system's default app.
+fn open_path(path: &Path) {
     let opener = if cfg!(windows) {
         "explorer"
     } else if cfg!(target_os = "macos") {
@@ -965,4 +1012,70 @@ fn open_folder(path: &Path) {
         "xdg-open"
     };
     let _ = std::process::Command::new(opener).arg(path).spawn();
+}
+
+/// Plain-text crash summary for pasting into a bug report or chat.
+fn crash_text(instance: &str, crash: &CrashInfo) -> String {
+    let mut out = format!(
+        "netherNode {}: {instance}\n{}\n",
+        env!("CARGO_PKG_VERSION"),
+        crash.title
+    );
+    for (label, value) in [
+        ("Cause", crash.cause.clone()),
+        ("Exit code", crash.exit_code.map(|c| c.to_string())),
+        (
+            "Report",
+            crash.report.as_ref().map(|p| p.display().to_string()),
+        ),
+        ("Hint", crash.hint.clone()),
+    ] {
+        if let Some(value) = value {
+            out.push_str(&format!("{label}: {value}\n"));
+        }
+    }
+    out
+}
+
+fn view_crash<'a>(name: &str, crash: &'a CrashInfo) -> Element<'a, Message> {
+    let mut details = column![text(&crash.title).size(17).color(theme::DANGER)].spacing(8);
+    if let Some(cause) = &crash.cause {
+        details = details.push(
+            text(cause)
+                .size(12)
+                .font(Font::MONOSPACE)
+                .color(theme::MUTED),
+        );
+    }
+    if let Some(hint) = &crash.hint {
+        details = details.push(text(hint).size(14));
+    }
+    let mut actions = row![].spacing(8);
+    if let Some(report) = &crash.report {
+        actions = actions.push(
+            button(text("Open crash report"))
+                .style(theme::secondary)
+                .padding([6, 12])
+                .on_press(Message::OpenFile(report.clone())),
+        );
+    }
+    actions = actions
+        .push(
+            button(text("Copy details"))
+                .style(theme::secondary)
+                .padding([6, 12])
+                .on_press(Message::CopyCrash(name.to_string())),
+        )
+        .push(space::horizontal())
+        .push(
+            button(text("Dismiss"))
+                .style(button::text)
+                .padding([6, 12])
+                .on_press(Message::DismissCrash(name.to_string())),
+        );
+    container(details.push(actions))
+        .padding(16)
+        .width(Length::Fill)
+        .style(theme::notice(true))
+        .into()
 }

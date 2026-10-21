@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::account::Account;
+use crate::crash::CrashInfo;
 use crate::download::{self, ProgressFn};
 use crate::error::Result;
 use crate::install::{self, Installed};
@@ -51,7 +52,11 @@ impl LaunchCommand {
 /// How a game run ended.
 #[derive(Debug)]
 pub enum RunOutcome {
-    Exited(std::process::ExitStatus),
+    /// The game ended by itself. `crash` is set when it crashed or failed to start.
+    Exited {
+        status: std::process::ExitStatus,
+        crash: Option<CrashInfo>,
+    },
     /// `stop` fired and the game was killed.
     Stopped,
 }
@@ -63,8 +68,21 @@ pub async fn run(
     mut on_line: impl FnMut(LogLine),
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<RunOutcome> {
+    use std::collections::VecDeque;
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    /// Output lines kept for crash analysis.
+    const TAIL: usize = 200;
+    let started = std::time::SystemTime::now();
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(TAIL);
+    let mut on_line = move |line: LogLine, tail: &mut VecDeque<String>| {
+        if tail.len() == TAIL {
+            tail.pop_front();
+        }
+        tail.push_back(line.text.clone());
+        on_line(line);
+    };
 
     let mut child = cmd
         .to_command()
@@ -84,13 +102,13 @@ pub async fn run(
             line = stdout.next_line(), if !out_done => match line? {
                 Some(line) => {
                     if let Some(entry) = parser.feed(&line) {
-                        on_line(entry);
+                        on_line(entry, &mut tail);
                     }
                 }
                 None => out_done = true,
             },
             line = stderr.next_line(), if !err_done => match line? {
-                Some(text) => on_line(LogLine { level: "STDERR".into(), thread: "java".into(), text }),
+                Some(text) => on_line(LogLine { level: "STDERR".into(), thread: "java".into(), text }, &mut tail),
                 None => err_done = true,
             },
             () = &mut stop => {
@@ -100,7 +118,12 @@ pub async fn run(
         }
     }
     tokio::select! {
-        status = child.wait() => Ok(RunOutcome::Exited(status?)),
+        status = child.wait() => {
+            let status = status?;
+            let tail: Vec<String> = tail.into();
+            let crash = crate::crash::analyze(&cmd.cwd, started, status.code(), &tail);
+            Ok(RunOutcome::Exited { status, crash })
+        }
         () = &mut stop => {
             child.kill().await?;
             Ok(RunOutcome::Stopped)
@@ -136,13 +159,34 @@ pub async fn prepare(
     check_lwjgl2_xrandr(&version, &env)?;
 
     // Java first: an x86-64 runtime emulated on an ARM machine needs x86-64 natives.
+    let required = version.java_version.clone().unwrap_or(JavaVersion {
+        component: Some("jre-legacy".into()),
+        major_version: 8,
+    });
     let java = match &instance.java_path {
-        Some(path) => path.clone(),
+        Some(path) => {
+            // A too-old Java fails with confusing "Unrecognized VM option" errors; say it plainly.
+            match java::major_version(path) {
+                Some(found) if found < required.major_version => {
+                    return Err(crate::error::other(format!(
+                        "Minecraft {} needs Java {} or newer, but the Java set for this instance ({}) \
+                         is Java {found}. Clear the Java path to let netherNode pick one automatically.",
+                        version.id,
+                        required.major_version,
+                        path.display()
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    return Err(crate::error::other(format!(
+                        "the Java set for this instance ({}) could not be run",
+                        path.display()
+                    )));
+                }
+            }
+            path.clone()
+        }
         None => {
-            let required = version.java_version.clone().unwrap_or(JavaVersion {
-                component: Some("jre-legacy".into()),
-                major_version: 8,
-            });
             let runtime = java::resolve(&http, paths, &env, &required, progress).await?;
             if let Some(arch) = runtime.arch {
                 env.arch = arch;
@@ -164,10 +208,18 @@ pub async fn prepare(
     .await?;
 
     // Measured after downloads, right before starting, so the free-memory figure is current.
+    // -Xmx/-Xms in the instance's own JVM arguments override the memory settings.
+    let user_heap = |flag: &str| {
+        instance
+            .jvm_args
+            .iter()
+            .rev()
+            .find_map(|a| a.strip_prefix(flag).and_then(memory::parse_size_mb))
+    };
     let heap = memory::plan_heap(
         SystemMemory::current(),
-        instance.max_memory_mb,
-        instance.min_memory_mb,
+        user_heap("-Xmx").or(instance.max_memory_mb),
+        user_heap("-Xms").or(instance.min_memory_mb),
     );
     let vars = variables(
         paths,
@@ -327,10 +379,15 @@ fn build_args(
     quick_play: Option<&QuickPlay>,
     heap: &HeapPlan,
 ) -> Vec<String> {
-    let mut args = vec![
-        format!("-Xms{}M", heap.min_mb),
-        format!("-Xmx{}M", heap.max_mb),
-    ];
+    // Heap flags in the instance's own JVM arguments win over ours.
+    let user_sets = |flag: &str| instance.jvm_args.iter().any(|a| a.starts_with(flag));
+    let mut args = Vec::new();
+    if !user_sets("-Xms") {
+        args.push(format!("-Xms{}M", heap.min_mb));
+    }
+    if !user_sets("-Xmx") {
+        args.push(format!("-Xmx{}M", heap.max_mb));
+    }
     args.extend(memory::gc_flags(heap, &instance.jvm_args));
 
     let modern = version.arguments.as_ref().filter(|a| !a.jvm.is_empty());

@@ -93,6 +93,24 @@ pub fn plan_heap(
     }
 }
 
+/// Parse a JVM size like `2G`, `512m` or `1048576k` into MB (rounded down).
+pub fn parse_size_mb(size: &str) -> Option<u32> {
+    let (digits, unit) = size.split_at(
+        size.find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(size.len()),
+    );
+    let n: u64 = digits.parse().ok()?;
+    let mb = match unit.to_ascii_lowercase().as_str() {
+        "" => n / (1024 * 1024),
+        "k" => n / 1024,
+        "m" => n,
+        "g" => n * 1024,
+        "t" => n * 1024 * 1024,
+        _ => return None,
+    };
+    u32::try_from(mb).ok()
+}
+
 /// Mojang's suggested flags that we replace: heap size, GC choice and tuning, and
 /// `AlwaysPreTouch`, which commits the whole heap at startup.
 pub fn is_replaced_flag(flag: &str) -> bool {
@@ -184,6 +202,15 @@ mod tests {
         let plan = plan_heap(mem(4096, 1500), Some(4096), None);
         assert_eq!(plan.max_mb, 4096);
         assert!(plan.warning.is_some());
+    }
+
+    #[test]
+    fn parses_jvm_sizes() {
+        assert_eq!(parse_size_mb("2G"), Some(2048));
+        assert_eq!(parse_size_mb("512m"), Some(512));
+        assert_eq!(parse_size_mb("1048576k"), Some(1024));
+        assert_eq!(parse_size_mb("abc"), None);
+        assert_eq!(parse_size_mb("99999999999M"), None); // doesn't fit; JVM will reject it anyway
     }
 
     #[test]

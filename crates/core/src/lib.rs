@@ -3,6 +3,7 @@
 //! Game files come from Mojang's public download servers; accounts are purely local.
 
 pub mod account;
+pub mod crash;
 pub mod download;
 pub mod error;
 pub mod install;
