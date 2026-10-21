@@ -1,193 +1,89 @@
-# netherNode: Offline Minecraft Launcher Roadmap
+# netherNode Roadmap
 
-A multi-instance Minecraft launcher with offline accounts, in the spirit of UltimMC (a C++/Qt5 fork of MultiMC).
-The launcher never ships Mojang files. Everything is downloaded at runtime from Mojang's own endpoints, as the official launcher does.
+An offline-accounts Minecraft launcher for Linux, macOS and Windows, written in Rust:
+`crates/core` (library), `crates/cli` (`nethernode`) and `crates/gui` (`nethernode-gui`, iced).
 
----
+## Ground rules
 
-## 0. Pick a stack (decide on day 1)
+- **No Microsoft or Mojang login, ever.** Only offline accounts. Game files still come from Mojang's public servers.
+- **No CurseForge.** Modrinth is the only source for mods and modpacks.
+- **Never ship Mojang's files or art.** Game jars, assets and textures are downloaded or read at runtime.
+- **Cross-platform:** every feature has to work on Linux (any distro), macOS (Intel and Apple Silicon) and Windows (x64 and ARM).
+- **Light on low-end machines:** memory is sized to the machine, and the GUI uses the CPU renderer and a static background at 8 GB of RAM or less.
 
-| Option | Good for | Notes |
+## Done
+
+| Area | What works | Verified |
 |---|---|---|
-| **Rust + Tauri** (UI in Svelte/React) | Small binaries, fast, cross-platform | `piston-mc` crate is a reference. LiquidLauncher is built this way. |
-| **Kotlin/Java + JavaFX or Compose** | Same ecosystem as the game | Easy to reuse `UUID.nameUUIDFromBytes`. JVM startup overhead. |
-| **C++ + Qt6** | Matches UltimMC/MultiMC/Prism | Most work, but the most code to borrow from. |
-| **Python + minecraft-launcher-lib** | Prototype in a weekend | Good for learning the pipeline before you rewrite it. |
+| Launching | Version manifest, libraries, natives, assets, Mojang Java runtimes (x86-64 under emulation on ARM), launch arguments, offline UUIDs | 1.8.9, 1.12.2, 1.16.5, 1.20.1, 26.3 on Linux |
+| Memory | Heap sized from total and free RAM, G1 flags, low-end `options.txt`, game stopped with the launcher | Freezes from stacked game processes gone |
+| Crashes | Crash reports, JVM `hs_err` logs and output tail turned into a cause and a fix; Java version checked before launch | Real OOM, bad heap and wrong-Java crashes |
+| Loaders | Fabric, Quilt, Forge (also pre-1.13), NeoForge; OptiFine from a user-supplied jar | All except OptiFine launched |
+| Mods | Modrinth search and install with dependencies, enable/disable/remove, add jars by picker or drag & drop, identify jars by hash | Fabric + Sodium + Iris + Mod Menu |
+| Modpacks | `.mrpack` import (picker or drop) and one-click Modrinth install; hidden while building, cleaned up if interrupted | Fabulously Optimized 26.2 and 1.21.1 |
+| GUI | Obsidian/violet glass over a live portal shader, instance cards, play bar, full version dropdown, loader picker, Mods/Modpacks/Accounts screens, crash cards | Screenshots of every screen, Linux |
+| Window | 1280×720 by default (Minecraft's own is 854×480), presets, custom size, fullscreen | Arguments checked for every version style |
+| Packaging | App icons (PNG/ICO/ICNS), Windows exe icon, Linux `.desktop` + installer script, macOS `.app` script, CI workflow | Cross-compiles for 6 targets; CI not yet run |
 
-**Decision:** Rust. `crates/core` is the launcher library, `crates/cli` the `nethernode` binary and `crates/gui` the `nethernode-gui` desktop app, built with **iced** (not Tauri). iced is pure Rust, needs no WebKit, and the GUI uses about 40 MB on low-RAM machines (CPU renderer) or about 90 MB (GPU renderer).
+## What's left
 
-**Status (2026-10-21):** Phases 1–3 are done. All five test versions (1.8.9, 1.12.2, 1.16.5, 1.20.1, 26.3) launch on Linux x64.
+### 1. Before the first public release (must have)
 
-**Platforms:** Linux (any distro), macOS (Intel + Apple Silicon) and Windows (x64 + ARM64).
-- The code compile-checks clean for all six targets. CI (`.github/workflows/ci.yml`) builds and tests natively on each OS. Actually playing the game on macOS and Windows still needs a manual test on real hardware.
-- On ARM machines, versions whose Java (8 or 16) has no ARM build use Mojang's x86-64 runtime under Rosetta 2 or Windows emulation, with matching x86-64 natives.
-- Linux: Minecraft ≤1.12.2 (LWJGL 2) needs the `xrandr` program; the launcher checks for it and prints the install command for each distro.
-- Linux ARM64: Mojang publishes no runtimes or older natives for it, so it uses the system Java, and versions before 1.19 lack ARM natives. Fixing this needs LWJGL replacement natives, as Prism does.
-- Windows: there is a 32 KB command-line limit. Big modded classpaths may need Java `@argfiles` later.
+1. **Test on real Windows and macOS machines.** Everything compiles for both but has never actually run there. Check:
+   - Windows: no stray console windows, the exe icon, the console-close/stop behaviour, paths with spaces or non-English characters, the 32 KB command-line limit with big modpacks (Java `@argfiles`).
+   - macOS: the `.app` opens (Gatekeeper), Apple Silicon running Java 8/16 under Rosetta, `-XstartOnFirstThread`.
+2. **Get CI running.** Put the repo on GitHub so `.github/workflows/ci.yml` builds and tests on all 5 runners and produces downloadable builds.
+3. **Settings screen.** Global defaults: memory, window size, Java path, data folder location, animation, close-launcher-on-play. Today these are per instance or hard-coded.
+4. **Mod updates.** "Updates available" on the Mods screen: compare each mod's Modrinth version with the newest compatible one and update one or all, keeping enabled/disabled state.
+5. **Self-updater.** Check GitHub Releases, verify a signature, then replace the binary (or point users to their package manager).
+6. **Installers and packages:**
+   - Windows: installer (MSI or NSIS) plus a portable zip.
+   - macOS: `.dmg`. Signing and notarization need an Apple Developer ID (paid); without it users must right-click → Open.
+   - Linux: AppImage and Flatpak, with AUR and `.deb` as nice-to-haves.
+7. **Test OptiFine with a real jar.** The install path follows HMCL's method but hasn't been tested.
 
----
+### 2. Instance management (should have)
 
-## Phase 1: Core launch pipeline (CLI only, no GUI)
+1. Rename, duplicate and change the Minecraft version of an instance, with a warning about mods.
+2. Export an instance as `.mrpack`, the reverse of import.
+3. Modpack updates: install a newer pack version over an instance and keep user changes (worlds, options).
+4. Import instances from Prism/MultiMC, the official launcher (`.minecraft`) and TLauncher.
+5. Custom instance icons, search/filter and groups once lists get long.
+6. Worlds tab: list saves, back up and restore, open folder.
 
-Goal: `nethernode launch 1.21.1 --user Steve` starts the game.
+### 3. More content from Modrinth (should have)
 
-1. **Version manifest**
-   - GET `https://piston-meta.mojang.com/mc/game/version_manifest_v2.json`
-   - It lists `latest.release`, `latest.snapshot` and `versions[]` (`id`, `type`, `url`, `sha1`).
-   - Cache it and refresh it on startup.
-2. **Version JSON**
-   - Fetch `versions[i].url` and check its `sha1`.
-   - Important keys: `downloads.client`, `libraries`, `assetIndex`, `arguments` (1.13+) or `minecraftArguments` (pre-1.13), `mainClass`, `javaVersion`, `logging`, `inheritsFrom` (used by mod loaders).
-3. **Rule evaluation**
-   - Libraries and arguments carry `rules[]` with `action: allow|disallow`, an `os` (`name`, `arch`, `version` regex) and `features` (`is_demo_user`, `has_custom_resolution`, `is_quick_play_*`...).
-   - Write a single `evaluate_rules()` and test it well. Most "game won't start" bugs come from here.
-4. **Libraries**
-   - For each allowed library, download `downloads.artifact` to `libraries/<path>` and verify its SHA1.
-   - Old-style natives (≤1.18): `natives.{linux,windows,osx}` + `classifiers`. Extract them to `natives/<version>/` and honour `extract.exclude` (META-INF).
-   - New-style natives (1.19+): native libraries are normal entries with a `:natives-linux` style name and OS rules. LWJGL extracts them itself, but still set `-Djava.library.path`.
-   - Library `name` follows Maven coordinates: `group:artifact:version[:classifier]` → `group/path/artifact/version/artifact-version[-classifier].jar`. You need this for mod loader libraries that only have `name` + `url`.
-5. **Client jar**: `downloads.client.url` → `versions/<id>/<id>.jar`.
-6. **Assets**
-   - Fetch `assetIndex.url` → `assets/indexes/<id>.json`.
-   - Each object is stored at `https://resources.download.minecraft.net/<hash[0:2]>/<hash>` → `assets/objects/<hash[0:2]>/<hash>`.
-   - Legacy indexes (`legacy`, `pre-1.6`) with `virtual`/`map_to_resources` need copying into `assets/virtual/legacy` or `resources/`.
-7. **Java runtime**
-   - Read `javaVersion.component` (`jre-legacy`, `java-runtime-alpha`, `-gamma`, `-delta`...) and `majorVersion`.
-   - Either detect a system JVM of the right major version, or download Mojang's runtime from its `all.json` runtime manifest (look up the current URL in the official launcher/piston-meta. The hash path has changed over time).
-   - Map OS/arch to keys like `linux`, `windows-x64`, `mac-os-arm64`.
-8. **Build the command line**
-   - Classpath = all allowed library jars + client jar, separated by `:` (Linux/macOS) or `;` (Windows).
-   - Substitute placeholders in `arguments.jvm` and `arguments.game`:
-     `${auth_player_name}`, `${auth_uuid}`, `${auth_access_token}`, `${user_type}`, `${version_name}`, `${game_directory}`, `${assets_root}`, `${assets_index_name}`, `${natives_directory}`, `${classpath}`, `${launcher_name}`, `${launcher_version}`, `${version_type}`, `${clientid}`, `${auth_xuid}`, `${resolution_width/height}`, `${quickPlay*}`.
-   - Add `-Xmx/-Xms` and the `logging.client.argument` (log4j config) if present.
-   - Run `java <jvm args> <mainClass> <game args>`, with cwd = the instance's game directory.
-9. **Downloader**: parallel (8–16 workers), resumable, SHA1-verified and retried. Skip files whose hash already matches. This makes later launches instant.
+1. Resource packs and shader packs: search and install into `resourcepacks/` and `shaderpacks/`, with an "Iris needed" hint for shaders.
+2. Data packs per world.
+3. Mod details panel: icon, gallery, changelog, versions to choose from.
 
-**Milestone:** launches 1.8.9, 1.12.2, 1.16.5, 1.20.x and latest on your OS. These cover the legacy args, old natives, new natives and Java 8/17/21 cases.
+### 4. Polish (nice to have)
 
----
+1. Logs viewer: `latest.log`, past logs and the crash report list, with search.
+2. Minecraft news panel from Mojang's public launcher news feed.
+3. Keyboard navigation, UI scaling, high-contrast option.
+4. Translations, starting with English and Hindi.
+5. Remember window size and position, and the selected instance.
+6. Quick join: saved servers per instance (quick play for 1.20+, `--server` for older).
 
-## Phase 2: Offline accounts
+### 5. Platform gaps (nice to have)
 
-Offline is just "launch with a made-up identity". There is no network auth.
+1. Linux ARM64: Mojang has no ARM natives before 1.19. This needs replacement LWJGL natives, as Prism does.
+2. Download mirrors for regions where Mojang's servers are slow (e.g. BMCLAPI), as an opt-in setting.
+3. A fully offline mode test: launch already-downloaded versions with no internet at all.
 
-- **UUID:** `UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(UTF_8))`, which is MD5 forced to version 3. Non-Java languages must reproduce it exactly (MD5 → set `byte[6] = (b & 0x0f) | 0x30`, `byte[8] = (b & 0x3f) | 0x80`). With this, offline servers and LAN worlds give the same player the same UUID. Renaming changes the UUID, so warn users about that.
-- **Placeholders:** `auth_player_name=<name>`, `auth_uuid=<uuid without dashes>`, `auth_access_token=0` (any dummy value), `user_type=legacy` (or `msa` on newer versions if a value is required), `auth_xuid=0`, `clientid=0`.
-- **Validation:** 3–16 characters, `[A-Za-z0-9_]`.
-- **Storage:** `accounts.json` with `{type: "offline", name, uuid}`.
-- **Low-memory handling (done):** heap size is automatic (¼ of RAM, 768 MB–3 GB) and shrinks to the memory that is actually free at launch. Mojang's ZGC/AlwaysPreTouch flags are replaced with G1. Machines with 8 GB or less get a lighter `options.txt`. The game is killed when the launcher exits, and an instance can't run twice.
-- **Known quirks:** multiplayer to online-mode servers won't work (by design). Some newer versions show a "chat disabled / profile keys" warning. Singleplayer and LAN are fine.
+## Open decisions
 
-**No Microsoft or Mojang login, ever.** This is a hard project rule. Game files are still downloaded from Mojang's public servers, but no account is ever checked.
+- **Skins for offline players.** Without Mojang auth, other players see default skins. Options:
+  - (a) Do nothing.
+  - (b) Bundle a client-side skin mod, such as CustomSkinLoader, into loader instances.
+  - (c) Support authlib-injector with a third-party skin server (Ely.by, self-hosted Drasl). This isn't Microsoft or Mojang, but it is still a login, so it needs your decision.
+- **Licence** for the project itself, before publishing (MIT or GPL-3.0 are typical for launchers).
+- **Name and branding check.** Make sure "netherNode" and the icon don't clash with existing projects or Mojang's brand guidelines.
 
-**Undecided:**
-- **authlib-injector / Yggdrasil (Ely.by, Drasl, LittleSkin):** third-party, not Microsoft/Mojang; gives offline-style players real skins. Add the JVM arg `-javaagent:authlib-injector.jar=<api-root>`, authenticate against that server's `/authserver/authenticate` and use the returned token and UUID. Drasl is self-hostable if you want your own skin server.
+## Known limitations (today)
 
----
-
-## Phase 3: Instances
-
-Instances are what make it MultiMC-like.
-
-```
-data/
-  meta/            cached manifests, version JSONs
-  libraries/       shared across instances
-  assets/          shared
-  runtimes/        downloaded JREs
-  instances/<name>/
-    instance.json  { mcVersion, loader, loaderVersion, javaPath, memory, jvmArgs, icon }
-    .minecraft/    game dir: saves, mods, resourcepacks, config, options.txt
-  accounts.json
-  settings.json
-```
-
-- Create, clone, rename, delete, import and export (zip) instances.
-- Per-instance overrides for Java, memory, resolution and JVM args.
-- Sharing `libraries/` and `assets/` saves disk space.
-
----
-
-## Phase 4: Mod loaders
-
-**Done:** Fabric, Quilt, Forge (including pre-1.13 "versionInfo" installers), NeoForge, and OptiFine from a user-supplied jar (its author forbids automated downloads). Forge/NeoForge installer processors are run by netherNode itself. The official installer aborts on distros whose Java uses zlib-ng (Fedora 40+), where compression output differs byte-for-byte; we only warn on checksum mismatches. Verified launching: Fabric 1.21.1 (+Sodium, Iris), Quilt 1.21.1, Forge 1.20.1, Forge 1.12.2, NeoForge 1.21.1. The OptiFine path is untested; it needs a real OptiFine jar.
-
-
-Every loader produces a version JSON that `inheritsFrom` the vanilla one. Write a **merge function**: take the parent and append child libraries (child wins on the same `group:artifact`), child `mainClass`, concatenate `arguments`.
-
-- **Fabric:** GET `https://meta.fabricmc.net/v2/versions/loader/<mc>/<loader>/profile/json`. Libraries use `name` + `url` (Maven repo), not `downloads`, so resolve them yourself.
-- **Quilt:** same idea at `meta.quiltmc.org/v3/...`.
-- **NeoForge / Forge (1.13+):** run the official installer jar headlessly (`--installClient <dir>`) into a temp `.minecraft`, or reimplement its `install_profile.json` processors (the hard way). Prism Launcher's meta repo shows how to pre-process these.
-- **Legacy Forge (≤1.12):** a version JSON plus libraries and the old `minecraftArguments` style.
-
----
-
-## Phase 5: GUI
-
-**Redesign (done):** obsidian + violet glass theme over a live nether portal drawn by a wgpu shader. The shader uses the obsidian and portal textures read at runtime from the user's downloaded game jar (never shipped by us), with procedural stand-ins before the first download. It runs at 30 fps (about 8% of one core), pauses while a game runs, can be turned off, and becomes a static gradient on the CPU renderer. TLauncher/UltimMC-style layout: instance cards with block-texture icons (double-click to play), details + console, a bottom play bar, a visual loader picker, and a Mods screen.
-
-
-**Done (first version):** instance sidebar, Play/Stop, live game log, download progress, new-instance form (searchable versions, snapshots, low-end preset), instance settings (memory, Java, JVM args), accounts screen, open folder, two-click delete. Closing the window stops running games. Debug builds can screenshot every screen with `NETHERNODE_SNAPSHOT=<dir>`.
-**Crash detection (done):** after a failed run, netherNode reads the new Minecraft crash report, a JVM `hs_err_pid*.log`, or the last 200 output lines. It shows the cause and a fix for known problems: out of memory, a bad heap setting, Java too old, missing xrandr, OpenGL/driver issues, graphics-driver JVM crashes and broken native libraries. A custom Java that is too old is rejected before launch. The GUI shows a crash card (open report, copy details); the CLI prints the same information.
-**Icons (done):** `assets/icon.svg` and `icon-small.svg` (16–32 px), turned into PNGs, `.ico` and `.icns` by `assets/build-icons.sh`. Used for the window icon, the sidebar logo, the Windows .exe resource (`crates/gui/build.rs`), the Linux `.desktop` file and `packaging/linux/install.sh`, and the macOS `.app` (`packaging/macos/make-app.sh`, built in CI).
-**Still to do:** news panel, a Windows installer, macOS notarization (needs an Apple Developer ID).
-
-
-- **Main window:** instance grid with icons, Play button, account switcher, news/log panel.
-- **Dialogs:** New Instance (version list filtered by release/snapshot/old, loader picker), Account Manager, Settings, Instance Settings.
-- **Live game log console** (stream stdout/stderr) and a **crash detector** that looks for `crash-reports/` and a non-zero exit code.
-- **Progress UI** for downloads, with bytes and file counts.
-
----
-
-## Phase 6: Mod and modpack content
-
-**Done:** Modrinth search filtered by loader and game version; install with required dependencies, preferring release builds; installed list with enable/disable/remove; add jars via file picker or by dropping them onto the window. **Modpacks (done):** `.mrpack` import (file picker, or drop a file anywhere on the window) and one-click install from Modrinth's modpack search. A pack becomes a new instance with its Minecraft version, loader, files and overrides. Downloads only from the hosts the format allows, paths must stay inside the instance, and mod names are identified by hash. Unfinished installs are hidden while running and cleaned up after an interruption.
-**To do:** mod and modpack updates, CurseForge (needs an API key).
-
-
-- **Modrinth API** (`api.modrinth.com/v2`): search, versions by game version + loader, dependencies, and the `.mrpack` modpack format (`modrinth.index.json` + overrides). It is open and easy, so start here.
-- **CurseForge:** needs an API key (apply for one at console.curseforge.com).
-- Mod list per instance with enable/disable (rename to `.jar.disabled`) and update checking.
-
----
-
-## Phase 7: Polish and distribution
-
-- Self-updater (GitHub Releases + signature check).
-- Java auto-detection on Windows (registry), Linux (`/usr/lib/jvm`) and macOS (`/Library/Java`).
-- Packaging: AppImage/Flatpak/.deb/AUR, Windows MSI/portable zip, macOS .dmg (notarization costs money).
-- CI: GitHub Actions matrix build for Linux, Windows and macOS.
-- Portable mode (data dir next to the binary).
-- Import from Prism/MultiMC/the official launcher.
-
----
-
-## Suggested timeline (solo, part-time)
-
-| Weeks | Deliverable |
-|---|---|
-| 1–2 | Phase 1 CLI launches vanilla across the 5 test versions |
-| 3 | Phase 2 offline accounts, Phase 3 instances on disk |
-| 4–5 | Phase 4 Fabric + Quilt, then NeoForge |
-| 6–8 | Phase 5 GUI |
-| 9+ | Phase 6 Modrinth, Phase 7 packaging/updater |
-
----
-
-## Reference projects to read
-
-- UltimMC: https://github.com/UltimMC/Launcher (C++/Qt, MultiMC fork with "Add Local" offline accounts)
-- Prism Launcher: https://github.com/PrismLauncher/PrismLauncher (the best-maintained MultiMC descendant, with clean `minecraft/` launch code)
-- HMCL: https://github.com/HMCL-dev/HMCL (Java, offline + authlib-injector)
-- LiquidLauncher: Rust/Tauri launcher core
-- minecraft-launcher-lib (Python): https://minecraft-launcher-lib.readthedocs.io
-- piston-mc (Rust crate): https://docs.rs/piston-mc
-- wiki.vg mirror, *Game files* and *Launching the game*: https://wikivg.booky.dev/Game_files
-- Minecraft Wiki, version_manifest.json: https://minecraft.fandom.com/wiki/Version_manifest.json
-- Fabric Meta: https://github.com/FabricMC/fabric-meta
-- Drasl (self-hosted Yggdrasil / authlib-injector server): https://git.plan9.rocks/unmojang/drasl
-
-## Legal note
-
-Offline mode is a built-in Minecraft feature. Keep the launcher clean by never redistributing Mojang jars or assets (download them from Mojang at runtime) and by not bypassing anything on online-mode servers. netherNode is offline-only by design and never asks for a Microsoft login.
+- iced has no backdrop blur, so the glass effect is a translucent tint.
+- The Mods screen needs a mod loader. Vanilla and OptiFine instances can't use it.
+- Minecraft textures in the UI only appear after the first game version has downloaded. Until then the UI uses its own pixel art.
+- The first launch of a large modpack on low-end hardware can take a few minutes. That's the game loading, not the launcher.

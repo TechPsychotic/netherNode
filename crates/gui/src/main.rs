@@ -216,6 +216,9 @@ pub struct EditForm {
     java_path: String,
     jvm_args: String,
     loader: LoaderPick,
+    width: String,
+    height: String,
+    fullscreen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +269,8 @@ pub enum Message {
     EditMaxMemory(String),
     EditJava(String),
     EditJvmArgs(String),
+    EditWindow(String, String),
+    EditFullscreen(bool),
     SaveEdit,
     PickLoader(Option<LoaderKind>),
     LoaderVersions(LoaderKind, String, Result<Vec<LoaderVersion>, String>),
@@ -944,6 +949,9 @@ impl App {
                         .map(|p| p.display().to_string())
                         .unwrap_or_default(),
                     jvm_args: i.jvm_args.join(" "),
+                    width: i.window_size().0.to_string(),
+                    height: i.window_size().1.to_string(),
+                    fullscreen: i.fullscreen,
                     loader: LoaderPick {
                         kind: i.loader.as_ref().map(|l| l.kind),
                         versions: None,
@@ -974,6 +982,17 @@ impl App {
                     f.jvm_args = v;
                 }
             }
+            Message::EditWindow(w, h) => {
+                if let Screen::EditInstance(f) = &mut self.screen {
+                    f.width = w.chars().filter(char::is_ascii_digit).take(5).collect();
+                    f.height = h.chars().filter(char::is_ascii_digit).take(5).collect();
+                }
+            }
+            Message::EditFullscreen(on) => {
+                if let Screen::EditInstance(f) = &mut self.screen {
+                    f.fullscreen = on;
+                }
+            }
             Message::SaveEdit => {
                 let Screen::EditInstance(f) = &self.screen else {
                     return Task::none();
@@ -995,6 +1014,19 @@ impl App {
                 let java = f.java_path.trim();
                 instance.java_path = (!java.is_empty()).then(|| PathBuf::from(java));
                 instance.jvm_args = f.jvm_args.split_whitespace().map(String::from).collect();
+                let size = |v: &str| v.parse::<u32>().ok().filter(|n| (320..=16384).contains(n));
+                match (size(&f.width), size(&f.height)) {
+                    (Some(w), Some(h)) => {
+                        // The launcher default isn't stored, so a later default change applies.
+                        instance.resolution =
+                            ((w, h) != nethernode_core::instance::DEFAULT_WINDOW).then_some((w, h));
+                    }
+                    _ => {
+                        self.error("Window width and height must be numbers between 320 and 16384");
+                        return Task::none();
+                    }
+                }
+                instance.fullscreen = f.fullscreen;
 
                 let current = instance
                     .loader

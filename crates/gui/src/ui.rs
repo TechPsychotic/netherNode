@@ -789,6 +789,56 @@ impl App {
         .into()
     }
 
+    fn window_section<'a>(&'a self, form: &'a EditForm) -> Element<'a, Message> {
+        const PRESETS: [(u32, u32, &str); 4] = [
+            (854, 480, "Small (Minecraft default)"),
+            (1280, 720, "HD 1280×720"),
+            (1600, 900, "1600×900"),
+            (1920, 1080, "Full HD 1920×1080"),
+        ];
+        let current = (
+            form.width.parse::<u32>().ok(),
+            form.height.parse::<u32>().ok(),
+        );
+        let presets = PRESETS.into_iter().map(|(w, h, label)| {
+            button(text(label).size(13))
+                .padding([6, 12])
+                .style(theme::segment(current == (Some(w), Some(h))))
+                .on_press(Message::EditWindow(w.to_string(), h.to_string()))
+                .into()
+        });
+        let height = form.height.clone();
+        let width = form.width.clone();
+        column![
+            text("Game window").size(13).color(theme::MUTED),
+            row(presets).spacing(6).wrap().vertical_spacing(6),
+            row![
+                text_input("Width", &form.width)
+                    .on_input(move |w| Message::EditWindow(w, height.clone()))
+                    .style(theme::input)
+                    .padding(8)
+                    .width(110),
+                text("×").color(theme::MUTED),
+                text_input("Height", &form.height)
+                    .on_input(move |h| Message::EditWindow(width.clone(), h))
+                    .style(theme::input)
+                    .padding(8)
+                    .width(110),
+                space::horizontal().width(12),
+                checkbox(form.fullscreen)
+                    .label("Start in fullscreen")
+                    .on_toggle(Message::EditFullscreen),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            text("In game, F11 switches between window and fullscreen.")
+                .size(12)
+                .color(theme::MUTED),
+        ]
+        .spacing(8)
+        .into()
+    }
+
     fn edit_form<'a>(&'a self, form: &'a EditForm) -> Element<'a, Message> {
         let minecraft = self.instance(&form.original).map(|i| i.minecraft_version());
         let note = format!(
@@ -825,6 +875,7 @@ impl App {
             .spacing(10)
             .align_y(Alignment::Center),
             self.loader_picker(&form.loader, minecraft),
+            self.window_section(form),
             memory,
             field(
                 "Java executable (leave empty to pick automatically)",

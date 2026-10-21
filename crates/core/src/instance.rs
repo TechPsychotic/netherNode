@@ -8,6 +8,10 @@ use crate::error::{Result, other};
 use crate::loader::Loader;
 use crate::paths::Paths;
 
+/// Window size when an instance doesn't set one. Minecraft's own default, 854x480, is tiny
+/// on today's screens.
+pub const DEFAULT_WINDOW: (u32, u32) = (1280, 720);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instance {
     pub name: String,
@@ -22,8 +26,12 @@ pub struct Instance {
     pub max_memory_mb: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub jvm_args: Vec<String>,
+    /// Game window size; `None` means [`DEFAULT_WINDOW`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<(u32, u32)>,
+    /// Start the game fullscreen.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fullscreen: bool,
     /// The mod loader, if any. `version` is then the loader's version id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loader: Option<Loader>,
@@ -68,10 +76,16 @@ impl Instance {
             max_memory_mb: None,
             jvm_args: Vec::new(),
             resolution: None,
+            fullscreen: false,
             loader: None,
             minecraft: None,
             modpack: None,
         })
+    }
+
+    /// The size the game window opens at.
+    pub fn window_size(&self) -> (u32, u32) {
+        self.resolution.unwrap_or(DEFAULT_WINDOW)
     }
 
     pub fn minecraft_version(&self) -> &str {

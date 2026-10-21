@@ -145,7 +145,8 @@ pub async fn prepare(
     std::fs::create_dir_all(&game_dir)?;
 
     let mut env = Environment::current();
-    if instance.resolution.is_some() {
+    // Always pass a size, so the game doesn't open at its tiny 854x480 default.
+    {
         env.features.insert("has_custom_resolution".into());
     }
     match &quick_play {
@@ -284,7 +285,7 @@ fn variables(
     let separator = if env.os_name == "windows" { ";" } else { ":" };
     let classpath: Vec<String> = installed.classpath.iter().map(path).collect();
     let game_dir = instance.game_dir(paths);
-    let (width, height) = instance.resolution.unwrap_or((854, 480));
+    let (width, height) = instance.window_size();
 
     let mut vars = HashMap::from([
         ("auth_player_name", account.name.clone()),
@@ -437,13 +438,18 @@ fn build_args(
     let supports_quick_play = game.iter().any(|s| s.starts_with("--quickPlay"));
     args.extend(game);
 
-    if let (Some((w, h)), None) = (instance.resolution, modern) {
+    // Pre-1.13 versions have no resolution arguments in their JSON but accept these.
+    if modern.is_none() {
+        let (w, h) = instance.window_size();
         args.extend([
             "--width".into(),
             w.to_string(),
             "--height".into(),
             h.to_string(),
         ]);
+    }
+    if instance.fullscreen {
+        args.push("--fullscreen".into());
     }
     // Versions before quick play (pre-1.20) still accept --server/--port.
     if let (Some(QuickPlay::Multiplayer(server)), false) = (quick_play, supports_quick_play) {

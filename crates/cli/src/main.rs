@@ -106,6 +106,12 @@ enum InstanceCmd {
         /// Also install a mod loader: fabric, quilt, forge or neoforge
         #[arg(long)]
         loader: Option<String>,
+        /// Game window size, e.g. 1920x1080 (default 1280x720)
+        #[arg(long, value_parser = parse_resolution)]
+        resolution: Option<(u32, u32)>,
+        /// Start the game fullscreen
+        #[arg(long)]
+        fullscreen: bool,
     },
     /// List instances
     List,
@@ -190,6 +196,22 @@ enum ModpackCmd {
     Install { project: String },
 }
 
+fn parse_resolution(s: &str) -> std::result::Result<(u32, u32), String> {
+    let (w, h) = s
+        .split_once(['x', 'X'])
+        .ok_or("use WIDTHxHEIGHT, e.g. 1920x1080")?;
+    let parse = |v: &str| {
+        v.trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (320..=16384).contains(n))
+    };
+    match (parse(w), parse(h)) {
+        (Some(w), Some(h)) => Ok((w, h)),
+        _ => Err("width and height must be numbers between 320 and 16384".into()),
+    }
+}
+
 fn parse_loader(name: &str) -> Result<LoaderKind> {
     LoaderKind::parse(name).ok_or_else(|| {
         anyhow::anyhow!("unknown loader '{name}' (fabric, quilt, forge, neoforge, optifine)")
@@ -266,6 +288,8 @@ async fn main() -> Result<()> {
                 low_end,
                 no_low_end,
                 loader,
+                resolution,
+                fullscreen,
             } => {
                 let loader = loader.as_deref().map(parse_loader).transpose()?;
                 let id = resolve_version_alias(&paths, &version).await?;
@@ -274,6 +298,8 @@ async fn main() -> Result<()> {
                 instance.max_memory_mb = max_memory;
                 instance.min_memory_mb = min_memory;
                 instance.java_path = java;
+                instance.resolution = resolution;
+                instance.fullscreen = fullscreen;
                 instance.save(&paths)?;
                 if let Some(kind) = loader {
                     loader::apply(
