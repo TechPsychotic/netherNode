@@ -12,7 +12,7 @@ use nethernode_core::loader::{self, LoaderKind};
 use nethernode_core::memory::SystemMemory;
 use nethernode_core::paths::Paths;
 use nethernode_core::version;
-use nethernode_core::{modpack, mods};
+use nethernode_core::{modpack, mods, share};
 
 #[derive(Parser)]
 #[command(name = "nethernode", version, about = "Offline Minecraft launcher")]
@@ -53,6 +53,9 @@ enum Command {
     /// Modrinth modpacks: import .mrpack files or install from Modrinth
     #[command(subcommand)]
     Modpack(ModpackCmd),
+    /// Play a LAN world with friends over the internet (no port forwarding)
+    #[command(subcommand)]
+    Share(ShareCmd),
     /// Download (if needed) and start an instance
     Launch {
         instance: String,
@@ -179,6 +182,24 @@ enum ModsCmd {
     Remove {
         instance: String,
         file: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ShareCmd {
+    /// Share a world you opened to LAN (the port Minecraft printed, e.g. "Local game hosted on port 51234")
+    Host {
+        port: u16,
+        /// Let everyone with the code in without asking
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Join a friend's world with their code
+    Join {
+        code: String,
+        /// Name shown in Minecraft's LAN list
+        #[arg(long, default_value = "Friend's world (netherNode)")]
+        name: String,
     },
 }
 
@@ -522,6 +543,53 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        Command::Share(cmd) => match cmd {
+            ShareCmd::Host { port, yes } => {
+                let stop = async {
+                    let _ = shutdown_signal().await;
+                };
+                share::host(
+                    port,
+                    move |event| match event {
+                        share::HostEvent::Ready(code) => {
+                            println!("Sharing localhost:{port}. Give your friend this code:\n\n  {code}\n")
+                        }
+                        share::HostEvent::Request { friend, reply } => {
+                            let allow = yes || {
+                                println!("{friend} wants to join. Allow? [y/N]");
+                                let mut line = String::new();
+                                std::io::stdin().read_line(&mut line).is_ok() && line.trim().eq_ignore_ascii_case("y")
+                            };
+                            let _ = reply.send(allow);
+                        }
+                        share::HostEvent::Joined { friend } => println!("{friend} joined"),
+                        share::HostEvent::Left { friend } => println!("{friend} left"),
+                    },
+                    stop,
+                )
+                .await?;
+            }
+            ShareCmd::Join { code, name } => {
+                let code: share::JoinCode = code.parse()?;
+                let stop = async {
+                    let _ = shutdown_signal().await;
+                };
+                share::join(
+                    &code,
+                    &name,
+                    |event| match event {
+                        share::JoinEvent::Connecting => println!("connecting…"),
+                        share::JoinEvent::WaitingForApproval => println!("waiting for your friend to allow you in…"),
+                        share::JoinEvent::Ready { port } => println!(
+                            "connected! In Minecraft: Multiplayer, the world shows under LAN, or Direct Connect to localhost:{port}"
+                        ),
+                    },
+                    stop,
+                )
+                .await?;
+            }
+        },
 
         Command::Launch {
             instance,

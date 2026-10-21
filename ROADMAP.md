@@ -25,6 +25,12 @@ An offline-accounts Minecraft launcher for Linux, macOS and Windows, written in 
 | Window | 1280×720 by default (Minecraft's own is 854×480), presets, custom size, fullscreen | Arguments checked for every version style |
 | Packaging | App icons (PNG/ICO/ICNS), Windows exe icon, Linux `.desktop` + installer script, macOS `.app` script, CI workflow | Cross-compiles for 6 targets; CI not yet run |
 
+## Play with friends (done)
+
+Invite friends / Join friend tunnel a LAN world over the internet with iroh: QUIC with TLS 1.3, NAT hole punching, and a relay fallback over HTTPS for CGNAT. The join code carries a random secret, the host approves each friend, and the joiner sees the world in Minecraft's LAN list. Verified on this machine: direct about 0 ms, relay-only 162 ms round trip (n0's public relays are in the US/EU).
+
+**Next:** self-hosted relay option (for example a small server in India) to cut relay latency; shorter join codes; show "direct" vs "relay" in the banner.
+
 ## What's left
 
 ### 1. Before the first public release (must have)

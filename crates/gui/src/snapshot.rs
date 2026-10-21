@@ -77,6 +77,46 @@ pub fn update(app: &mut App, step: Step) -> Task<Message> {
                     send(app, Message::PickLoader(Some(LoaderKind::Fabric)));
                     2500
                 }
+                "host-share" => {
+                    // Pretend the selected instance is running with its world open to LAN
+                    // on $NETHERNODE_SNAPSHOT_LAN_PORT, then invite friends.
+                    let port = std::env::var("NETHERNODE_SNAPSHOT_LAN_PORT")
+                        .ok()
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(5555);
+                    app.runs.insert(
+                        selected.clone(),
+                        crate::Run {
+                            stage: None,
+                            heap: Some("test".into()),
+                            stop: None,
+                            lan_port: Some(port),
+                        },
+                    );
+                    send(app, Message::ShowHome);
+                    send(app, Message::InviteFriends(selected));
+                    20_000
+                }
+                "host-request" => {
+                    // Publish the code for an outside joiner, then wait for its request.
+                    if let (Some(dir), Some(code)) =
+                        (dir(), app.host_share.as_ref().and_then(|s| s.code.clone()))
+                    {
+                        let _ = std::fs::write(dir.join("code.txt"), code);
+                    }
+                    25_000
+                }
+                "host-allow" => {
+                    send(app, Message::AnswerJoin(0, true));
+                    6000
+                }
+                "join-friend" => {
+                    let code = std::env::var("NETHERNODE_SNAPSHOT_CODE").unwrap_or_default();
+                    send(app, Message::ShowJoinFriend);
+                    send(app, Message::JoinCodeInput(code));
+                    send(app, Message::StartJoin);
+                    12_000
+                }
                 "settings" => {
                     send(app, Message::ShowSettings);
                     800

@@ -90,6 +90,9 @@ impl App {
             Screen::Mods(view) => self.mods_screen(view),
             Screen::Modpacks(view) => self.modpacks_screen(view),
             Screen::Settings(form) => self.dialog(self.settings_form(form)),
+            Screen::JoinFriend { code, error } => {
+                self.dialog(join_friend_form(code, error.as_deref()))
+            }
         };
         let mut content = column![self.top_bar()].spacing(14);
         if let Some((is_error, msg)) = &self.notice {
@@ -107,7 +110,10 @@ impl App {
                 .style(theme::notice(*is_error)),
             );
         }
-        content = content.push(body).push(self.play_bar());
+        content = content
+            .extend(self.share_banners())
+            .push(body)
+            .push(self.play_bar());
 
         if self.gpu {
             let portal = Portal {
@@ -146,6 +152,7 @@ impl App {
             .spacing(8)
             .align_y(Alignment::Center);
         right = right
+            .push(small_button("Join friend").on_press(Message::ShowJoinFriend))
             .push(small_button("Modpacks").on_press(Message::ShowModpacks))
             .push(small_button("Accounts").on_press(Message::ShowAccounts))
             .push(small_button("Settings").on_press(Message::ShowSettings));
@@ -385,6 +392,17 @@ impl App {
             .spacing(16)
             .align_y(Alignment::Center);
 
+        // Once the world is open to LAN, it can be shared over the internet.
+        let invite: Option<Element<'_, Message>> = match self.runs.get(&name) {
+            Some(run) if run.lan_port.is_some() && self.host_share.is_none() => Some(
+                button(text("Invite friends").size(14).font(BOLD))
+                    .padding([8, 16])
+                    .style(theme::play)
+                    .on_press(Message::InviteFriends(name.clone()))
+                    .into(),
+            ),
+            _ => None,
+        };
         let actions = row![
             small_button("Mods").on_press(Message::ShowMods(name.clone())),
             small_button("Edit").on_press_maybe((!busy).then(|| Message::ShowEdit(name.clone()))),
@@ -395,9 +413,21 @@ impl App {
                 .style(theme::danger_button)
                 .on_press_maybe((!busy).then(|| Message::Delete(name.clone()))),
         ]
+        .extend(invite)
         .spacing(8);
 
         let mut body = column![header, actions].spacing(14);
+        if self
+            .runs
+            .get(&name)
+            .is_some_and(|r| r.heap.is_some() && r.lan_port.is_none())
+        {
+            body = body.push(
+                text("Playing with friends? In the game press Esc → Open to LAN → Start LAN World, then click Invite friends here.")
+                    .size(12)
+                    .color(theme::MUTED),
+            );
+        }
         let stage = self
             .jobs
             .get(&name)
@@ -830,6 +860,114 @@ impl App {
         ]
         .spacing(18)
         .into()
+    }
+
+    /// Banners for an active share (host) and a joined friend's world. Shown on every
+    /// screen, since join requests need an answer wherever the player is.
+    fn share_banners(&self) -> Vec<Element<'_, Message>> {
+        let mut banners = Vec::new();
+        if let Some(share) = &self.host_share {
+            let mut col = column![].spacing(10);
+            let head: Element<'_, Message> = match &share.code {
+                None => text(format!("Getting {} ready to share…", share.instance)).into(),
+                Some(code) => row![
+                    column![
+                        text(format!(
+                            "Sharing {} with friends. Send them this code:",
+                            share.instance
+                        ))
+                        .size(13),
+                        text(code).size(13).font(MONO).color(theme::VIOLET_BRIGHT),
+                    ]
+                    .spacing(4)
+                    .width(Length::Fill),
+                    small_button("Copy code").on_press(Message::CopyText(code.clone())),
+                    button(text("Stop sharing").size(14))
+                        .padding([8, 14])
+                        .style(theme::danger_button)
+                        .on_press(Message::StopSharing),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into(),
+            };
+            col = col.push(head);
+            for (i, (friend, _)) in share.requests.iter().enumerate() {
+                col = col.push(
+                    container(
+                        row![
+                            text(format!(
+                                "Someone with your code ({friend}) wants to join. Allow?"
+                            ))
+                            .size(14)
+                            .width(Length::Fill),
+                            button(text("Allow").size(14).font(BOLD))
+                                .padding([6, 16])
+                                .style(theme::play)
+                                .on_press(Message::AnswerJoin(i, true)),
+                            button(text("Deny").size(14))
+                                .padding([6, 14])
+                                .style(theme::danger_button)
+                                .on_press(Message::AnswerJoin(i, false)),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([8, 12])
+                    .style(theme::notice(false)),
+                );
+            }
+            if !share.friends.is_empty() {
+                col = col.push(
+                    text(format!("In your world: {}", share.friends.join(", ")))
+                        .size(12)
+                        .color(theme::MUTED),
+                );
+            }
+            banners.push(
+                container(col)
+                    .padding([12, 16])
+                    .style(theme::glass_dense)
+                    .into(),
+            );
+        }
+        if let Some(session) = &self.join_session {
+            use nethernode_core::share::JoinEvent;
+            let (msg, port) = match &session.status {
+                JoinEvent::Connecting => ("Connecting to your friend…".to_string(), None),
+                JoinEvent::WaitingForApproval => {
+                    ("Waiting for your friend to let you in…".to_string(), None)
+                }
+                JoinEvent::Ready { port } => (
+                    format!(
+                        "Connected! In Minecraft: Multiplayer → the world is under LAN, or Direct Connect to localhost:{port}"
+                    ),
+                    Some(*port),
+                ),
+            };
+            let mut row = row![text(msg).size(13).width(Length::Fill)]
+                .spacing(8)
+                .align_y(Alignment::Center);
+            if let Some(port) = port {
+                row = row.push(
+                    small_button("Copy address")
+                        .on_press(Message::CopyText(format!("localhost:{port}"))),
+                );
+            }
+            row = row.push(
+                button(text("Leave").size(14))
+                    .padding([8, 14])
+                    .style(theme::danger_button)
+                    .on_press(Message::LeaveFriend),
+            );
+            banners.push(
+                container(row)
+                    .padding([12, 16])
+                    .style(theme::glass_dense)
+                    .into(),
+            );
+        }
+        banners
     }
 
     fn edit_worlds_section<'a>(&'a self, form: &'a EditForm) -> Element<'a, Message> {
@@ -1564,5 +1702,41 @@ fn new_worlds_section(form: &NewInstanceForm) -> Element<'_, Message> {
         .spacing(8),
     ]
     .spacing(8)
+    .into()
+}
+
+fn join_friend_form<'a>(code: &'a str, error: Option<&'a str>) -> Element<'a, Message> {
+    let can_join = !code.trim().is_empty();
+    let mut col = column![
+        row![
+            text("Join a friend").size(26).font(BOLD),
+            space::horizontal(),
+            small_button("Cancel").on_press(Message::ShowHome),
+            button(text("Join").size(15).font(BOLD))
+                .padding([10, 26])
+                .style(theme::play)
+                .on_press_maybe(can_join.then_some(Message::StartJoin)),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+        text("Paste the code your friend got from \"Invite friends\". No port forwarding needed: netherNode connects directly when it can, otherwise through an encrypted relay.")
+            .size(13)
+            .color(theme::MUTED),
+        text_input("Join code", code)
+            .on_input(Message::JoinCodeInput)
+            .on_submit_maybe(can_join.then_some(Message::StartJoin))
+            .style(theme::input)
+            .font(MONO)
+            .padding(10),
+    ]
+    .spacing(16);
+    if let Some(error) = error {
+        col = col.push(text(error).size(13).color(theme::DANGER));
+    }
+    col.push(
+        text("Then start any instance with the same Minecraft version (and mods) as your friend, and pick the world under LAN in Multiplayer.")
+            .size(12)
+            .color(theme::MUTED),
+    )
     .into()
 }

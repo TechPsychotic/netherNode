@@ -106,6 +106,8 @@ pub struct App {
     refreshing_versions: bool,
     /// Modpack installs in progress, by Modrinth project id or file path.
     pack_jobs: HashMap<String, Job>,
+    host_share: Option<HostShare>,
+    join_session: Option<JoinSession>,
     /// Which loaders have a release for each Minecraft version (checked when picked).
     loader_support: HashMap<String, HashMap<LoaderKind, Load<bool>>>,
 }
@@ -115,6 +117,38 @@ pub struct Run {
     stage: Option<(String, u64, u64)>,
     heap: Option<String>,
     stop: Option<oneshot::Sender<()>>,
+    /// Port of the world once the player opens it to LAN (read from the game log).
+    lan_port: Option<u16>,
+}
+
+/// The world this computer is sharing with friends over the internet.
+pub struct HostShare {
+    instance: String,
+    code: Option<String>,
+    stop: Option<oneshot::Sender<()>>,
+    /// Friends waiting for Allow/Deny.
+    requests: Vec<(String, game::JoinReply)>,
+    friends: Vec<String>,
+}
+
+/// A friend's world this computer has joined.
+pub struct JoinSession {
+    status: nethernode_core::share::JoinEvent,
+    stop: Option<oneshot::Sender<()>>,
+}
+
+/// The LAN port in a game log line: "Started serving on 51234" (server log) or
+/// "Local game hosted on port 51234" (chat message).
+fn lan_port_from(line: &str) -> Option<u16> {
+    ["Started serving on ", "hosted on port "]
+        .iter()
+        .find_map(|marker| {
+            let rest = &line[line.find(marker)? + marker.len()..];
+            rest.split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()
+        })
 }
 
 pub struct Job {
@@ -130,6 +164,7 @@ pub enum Screen {
     Mods(ModsView),
     Modpacks(PacksView),
     Settings(SettingsForm),
+    JoinFriend { code: String, error: Option<String> },
 }
 
 /// Something loaded in the background.
@@ -323,6 +358,16 @@ pub enum Message {
     PackJob(String, game::JobEvent),
     CloseRequested(window::Id),
     LoaderSupport(String, LoaderKind, Result<bool, String>),
+    InviteFriends(String),
+    Share(game::ShareEvent),
+    StopSharing,
+    AnswerJoin(usize, bool),
+    CopyText(String),
+    ShowJoinFriend,
+    JoinCodeInput(String),
+    StartJoin,
+    JoinUpdate(game::JoinUpdate),
+    LeaveFriend,
     OptiFineAlternative(bool),
     NewAddWorlds(bool),
     NewWorldsPicked(Vec<PathBuf>),
@@ -399,6 +444,8 @@ impl App {
             refreshing_versions: true,
             pack_jobs: HashMap::new(),
             loader_support: HashMap::new(),
+            host_share: None,
+            join_session: None,
             paths: paths.clone(),
         };
         if !interrupted.is_empty() {
@@ -827,6 +874,7 @@ impl App {
                         stage: None,
                         heap: None,
                         stop: Some(stop_tx),
+                        lan_port: None,
                     },
                 );
                 let log = self.logs.entry(name.clone()).or_default();
@@ -880,9 +928,22 @@ impl App {
                             run.heap = Some(heap);
                         }
                     }
-                    game::Event::Log(line) => push(line),
+                    game::Event::Log(line) => {
+                        if let Some(port) = lan_port_from(&line)
+                            && let Some(run) = self.runs.get_mut(&name)
+                        {
+                            run.lan_port = Some(port);
+                        }
+                        push(line);
+                    }
                     game::Event::Finished(ended) => {
                         self.runs.remove(&name);
+                        // The shared world is gone with the game.
+                        if let Some(share) = self.host_share.as_mut().filter(|s| s.instance == name)
+                            && let Some(stop) = share.stop.take()
+                        {
+                            let _ = stop.send(());
+                        }
                         match ended {
                             game::Ended::Ok(status) => push(status),
                             game::Ended::Failed(e) => {
@@ -1234,6 +1295,122 @@ impl App {
                 self.notice = Some((false, "Saved".into()));
                 if loader_changed {
                     return self.start_loader_job(instance, &form.loader);
+                }
+            }
+
+            Message::InviteFriends(name) => {
+                let Some(port) = self.runs.get(&name).and_then(|r| r.lan_port) else {
+                    self.error("Open the world to LAN in the game first (Esc → Open to LAN)");
+                    return Task::none();
+                };
+                if self.host_share.is_some() {
+                    return Task::none();
+                }
+                let (stop_tx, stop_rx) = oneshot::channel();
+                self.host_share = Some(HostShare {
+                    instance: name,
+                    code: None,
+                    stop: Some(stop_tx),
+                    requests: Vec::new(),
+                    friends: Vec::new(),
+                });
+                return Task::run(game::host_share(port, stop_rx), Message::Share);
+            }
+            Message::Share(event) => {
+                let Some(share) = self.host_share.as_mut() else {
+                    return Task::none();
+                };
+                match event {
+                    game::ShareEvent::Ready(code) => share.code = Some(code),
+                    game::ShareEvent::Request(friend, reply) => {
+                        share.requests.push((friend, reply))
+                    }
+                    game::ShareEvent::Joined(friend) => {
+                        self.notice = Some((false, format!("{friend} joined your world")));
+                        share.friends.push(friend);
+                    }
+                    game::ShareEvent::Left(friend) => share.friends.retain(|f| *f != friend),
+                    game::ShareEvent::Ended(result) => {
+                        self.host_share = None;
+                        if let Err(e) = result {
+                            self.error(format!("Sharing stopped: {e}"));
+                        }
+                    }
+                }
+            }
+            Message::StopSharing => {
+                if let Some(stop) = self.host_share.as_mut().and_then(|s| s.stop.take()) {
+                    let _ = stop.send(());
+                }
+            }
+            Message::AnswerJoin(index, allow) => {
+                if let Some(share) = self.host_share.as_mut()
+                    && index < share.requests.len()
+                {
+                    let (_, reply) = share.requests.remove(index);
+                    if let Some(reply) = reply.lock().unwrap().take() {
+                        let _ = reply.send(allow);
+                    }
+                }
+            }
+            Message::CopyText(text) => return iced::clipboard::write(text),
+            Message::ShowJoinFriend => {
+                self.screen = Screen::JoinFriend {
+                    code: String::new(),
+                    error: None,
+                };
+            }
+            Message::JoinCodeInput(value) => {
+                if let Screen::JoinFriend { code, error } = &mut self.screen {
+                    *code = value;
+                    *error = None;
+                }
+            }
+            Message::StartJoin => {
+                let Screen::JoinFriend { code, error } = &mut self.screen else {
+                    return Task::none();
+                };
+                let parsed = match code.parse::<nethernode_core::share::JoinCode>() {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        *error = Some(e.to_string());
+                        return Task::none();
+                    }
+                };
+                if self.join_session.is_some() {
+                    *error = Some("You're already in a friend's world; leave it first".into());
+                    return Task::none();
+                }
+                let (stop_tx, stop_rx) = oneshot::channel();
+                self.join_session = Some(JoinSession {
+                    status: nethernode_core::share::JoinEvent::Connecting,
+                    stop: Some(stop_tx),
+                });
+                self.screen = Screen::Home;
+                return Task::run(game::join_share(parsed, stop_rx), Message::JoinUpdate);
+            }
+            Message::JoinUpdate(update) => match update {
+                game::JoinUpdate::Status(status) => {
+                    if let Some(session) = self.join_session.as_mut() {
+                        session.status = status;
+                    }
+                }
+                game::JoinUpdate::Ended(result) => {
+                    let was_in = matches!(
+                        self.join_session.as_ref().map(|s| &s.status),
+                        Some(nethernode_core::share::JoinEvent::Ready { .. })
+                    );
+                    self.join_session = None;
+                    match result {
+                        Ok(()) => self.notice = Some((false, "Left your friend's world".into())),
+                        Err(e) if was_in => self.error(format!("Disconnected: {e}")),
+                        Err(e) => self.error(format!("Couldn't join: {e}")),
+                    }
+                }
+            },
+            Message::LeaveFriend => {
+                if let Some(stop) = self.join_session.as_mut().and_then(|s| s.stop.take()) {
+                    let _ = stop.send(());
                 }
             }
 
@@ -1826,4 +2003,25 @@ fn open_path(target: &std::ffi::OsStr) {
         "xdg-open"
     };
     let _ = std::process::Command::new(opener).arg(target).spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lan_port_from;
+
+    #[test]
+    fn finds_lan_port_in_game_log() {
+        assert_eq!(
+            lan_port_from("[12:00:01] [Server thread/INFO]: Started serving on 51234"),
+            Some(51234)
+        );
+        assert_eq!(
+            lan_port_from("[Render thread/INFO]: [CHAT] Local game hosted on port 40000"),
+            Some(40000)
+        );
+        assert_eq!(
+            lan_port_from("[Server thread/INFO]: Starting integrated minecraft server"),
+            None
+        );
+    }
 }

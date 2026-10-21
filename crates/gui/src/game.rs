@@ -135,3 +135,73 @@ where
     };
     stream::select(rx, stream::once(run).filter_map(|()| async { None }))
 }
+
+/// The host's answer to a join request; shared so the event can be cloned.
+pub type JoinReply = Arc<std::sync::Mutex<Option<oneshot::Sender<bool>>>>;
+
+/// Host-side sharing events, made cloneable for iced messages.
+#[derive(Debug, Clone)]
+pub enum ShareEvent {
+    Ready(String),
+    /// A friend with the right code is asking to join; answer through the sender.
+    Request(String, JoinReply),
+    Joined(String),
+    Left(String),
+    Ended(Result<(), String>),
+}
+
+/// Share a world opened to LAN on `port` until `stop` fires.
+pub fn host_share(port: u16, stop: oneshot::Receiver<()>) -> impl Stream<Item = ShareEvent> {
+    use nethernode_core::share::{self, HostEvent};
+    let (tx, rx) = mpsc::unbounded();
+    let events = tx.clone();
+    let run = async move {
+        let result = share::host(
+            port,
+            move |event| {
+                let event = match event {
+                    HostEvent::Ready(code) => ShareEvent::Ready(code.to_string()),
+                    HostEvent::Request { friend, reply } => {
+                        ShareEvent::Request(friend, Arc::new(std::sync::Mutex::new(Some(reply))))
+                    }
+                    HostEvent::Joined { friend } => ShareEvent::Joined(friend),
+                    HostEvent::Left { friend } => ShareEvent::Left(friend),
+                };
+                let _ = events.unbounded_send(event);
+            },
+            stop.map(|_| ()),
+        )
+        .await;
+        let _ = tx.unbounded_send(ShareEvent::Ended(result.map_err(|e| e.to_string())));
+    };
+    stream::select(rx, stream::once(run).filter_map(|()| async { None }))
+}
+
+/// Joiner-side events.
+#[derive(Debug, Clone)]
+pub enum JoinUpdate {
+    Status(nethernode_core::share::JoinEvent),
+    Ended(Result<(), String>),
+}
+
+/// Join a friend's world until `stop` fires or the host ends it.
+pub fn join_share(
+    code: nethernode_core::share::JoinCode,
+    stop: oneshot::Receiver<()>,
+) -> impl Stream<Item = JoinUpdate> {
+    let (tx, rx) = mpsc::unbounded();
+    let events = tx.clone();
+    let run = async move {
+        let result = nethernode_core::share::join(
+            &code,
+            "Friend's world (netherNode)",
+            move |event| {
+                let _ = events.unbounded_send(JoinUpdate::Status(event));
+            },
+            stop.map(|_| ()),
+        )
+        .await;
+        let _ = tx.unbounded_send(JoinUpdate::Ended(result.map_err(|e| e.to_string())));
+    };
+    stream::select(rx, stream::once(run).filter_map(|()| async { None }))
+}

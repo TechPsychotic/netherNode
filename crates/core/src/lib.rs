@@ -18,6 +18,7 @@ pub mod mods;
 pub mod paths;
 pub mod rules;
 pub mod settings;
+pub mod share;
 pub mod version;
 pub mod worlds;
 
