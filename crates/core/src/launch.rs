@@ -9,6 +9,7 @@ use crate::error::Result;
 use crate::install::{self, Installed};
 use crate::instance::Instance;
 use crate::java;
+use crate::log::{LogLine, XmlLogParser};
 use crate::memory::{self, HeapPlan, SystemMemory};
 use crate::paths::Paths;
 use crate::rules::{self, Environment};
@@ -40,7 +41,70 @@ impl LaunchCommand {
         cmd.args(&self.args)
             .current_dir(&self.cwd)
             .kill_on_drop(true);
+        // Without this, a GUI launcher (no console of its own) would pop up a console window.
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         cmd
+    }
+}
+
+/// How a game run ended.
+#[derive(Debug)]
+pub enum RunOutcome {
+    Exited(std::process::ExitStatus),
+    /// `stop` fired and the game was killed.
+    Stopped,
+}
+
+/// Start the game and feed every log line (stdout and stderr) to `on_line` until it exits.
+/// If `stop` completes first, the game is killed. Shared by the CLI and the GUI.
+pub async fn run(
+    cmd: &LaunchCommand,
+    mut on_line: impl FnMut(LogLine),
+    stop: impl std::future::Future<Output = ()>,
+) -> Result<RunOutcome> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut child = cmd
+        .to_command()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| crate::error::other(format!("failed to start {}: {e}", cmd.java.display())))?;
+    let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
+    let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr")).lines();
+    let mut parser = XmlLogParser::default();
+    let (mut out_done, mut err_done) = (false, false);
+    tokio::pin!(stop);
+
+    while !(out_done && err_done) {
+        tokio::select! {
+            line = stdout.next_line(), if !out_done => match line? {
+                Some(line) => {
+                    if let Some(entry) = parser.feed(&line) {
+                        on_line(entry);
+                    }
+                }
+                None => out_done = true,
+            },
+            line = stderr.next_line(), if !err_done => match line? {
+                Some(text) => on_line(LogLine { level: "STDERR".into(), thread: "java".into(), text }),
+                None => err_done = true,
+            },
+            () = &mut stop => {
+                child.kill().await?;
+                return Ok(RunOutcome::Stopped);
+            }
+        }
+    }
+    tokio::select! {
+        status = child.wait() => Ok(RunOutcome::Exited(status?)),
+        () = &mut stop => {
+            child.kill().await?;
+            Ok(RunOutcome::Stopped)
+        }
     }
 }
 

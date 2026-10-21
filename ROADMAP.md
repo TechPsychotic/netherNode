@@ -14,7 +14,7 @@ The launcher never ships Mojang files. Everything is downloaded at runtime from 
 | **C++ + Qt6** | Matches UltimMC/MultiMC/Prism | Most work, but the most code to borrow from. |
 | **Python + minecraft-launcher-lib** | Prototype in a weekend | Good for learning the pipeline before you rewrite it. |
 
-**Decision:** Rust. `crates/core` is the launcher library and `crates/cli` the `nethernode` binary. A Tauri GUI will sit on top of `core`.
+**Decision:** Rust. `crates/core` is the launcher library, `crates/cli` the `nethernode` binary and `crates/gui` the `nethernode-gui` desktop app, built with **iced** (not Tauri). iced is pure Rust, needs no WebKit, and the GUI uses about 40 MB on low-RAM machines (CPU renderer) or about 90 MB (GPU renderer).
 
 **Status (2026-10-21):** Phases 1–3 are done. All five test versions (1.8.9, 1.12.2, 1.16.5, 1.20.1, 26.3) launch on Linux x64.
 
@@ -120,6 +120,10 @@ Every loader produces a version JSON that `inheritsFrom` the vanilla one. Write 
 ---
 
 ## Phase 5: GUI
+
+**Done (first version):** instance sidebar, Play/Stop, live game log, download progress, new-instance form (searchable versions, snapshots, low-end preset), instance settings (memory, Java, JVM args), accounts screen, open folder, two-click delete. Closing the window stops running games. Debug builds can screenshot every screen with `NETHERNODE_SNAPSHOT=<dir>`.
+**Still to do:** news panel, crash-report detection, icons/branding, a macOS .app bundle and a Windows icon/manifest.
+
 
 - **Main window:** instance grid with icons, Play button, account switcher, news/log panel.
 - **Dialogs:** New Instance (version list filtered by release/snapshot/old, loader picker), Account Manager, Settings, Instance Settings.

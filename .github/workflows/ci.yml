@@ -32,4 +32,6 @@ jobs:
           path: |
             target/release/nethernode
             target/release/nethernode.exe
+            target/release/nethernode-gui
+            target/release/nethernode-gui.exe
           if-no-files-found: error

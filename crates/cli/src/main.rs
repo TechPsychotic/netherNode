@@ -1,18 +1,16 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use nethernode_core::account::Accounts;
 use nethernode_core::download::{self, Progress, ProgressFn};
 use nethernode_core::instance::Instance;
 use nethernode_core::launch::{self, QuickPlay};
-use nethernode_core::log::XmlLogParser;
 use nethernode_core::memory::SystemMemory;
 use nethernode_core::paths::Paths;
 use nethernode_core::version;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Parser)]
 #[command(name = "nethernode", version, about = "Offline Minecraft launcher")]
@@ -254,30 +252,18 @@ async fn main() -> Result<()> {
                     ""
                 }
             );
-            let mut child = cmd
-                .to_command()
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .context("failed to start java")?;
-            let stdout = child.stdout.take().expect("piped stdout");
-            let logs = tokio::spawn(async move {
-                let mut lines = BufReader::new(stdout).lines();
-                let mut parser = XmlLogParser::default();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Some(entry) = parser.feed(&line) {
-                        println!("{entry}");
-                    }
-                }
-            });
-            let status = tokio::select! {
-                status = child.wait() => status?,
-                signal = shutdown_signal() => {
-                    eprintln!("received {signal}, stopping the game");
-                    child.kill().await?;
-                    bail!("game stopped by {signal}");
+            let signal = std::sync::OnceLock::new();
+            let outcome = launch::run(&cmd, |line| println!("{line}"), async {
+                let _ = signal.set(shutdown_signal().await);
+            })
+            .await?;
+            let status = match outcome {
+                launch::RunOutcome::Exited(status) => status,
+                launch::RunOutcome::Stopped => {
+                    let signal = signal.get().copied().unwrap_or("signal");
+                    bail!("received {signal}, game stopped");
                 }
             };
-            let _ = logs.await;
             if !status.success() {
                 bail!("game exited with {status}; see {}/logs", cmd.cwd.display());
             }
