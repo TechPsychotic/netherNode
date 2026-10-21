@@ -30,7 +30,7 @@ const ICONS: &[(&str, &str)] = &[
     ("vanilla", "block/grass_block_side"),
     ("fabric", "block/crafting_table_front"),
     ("quilt", "block/loom_front"),
-    ("forge", "block/anvil"),
+    ("forge", "block/furnace_front_on"),
     ("neoforge", "block/smithing_table_front"),
     ("optifine", "block/glass"),
 ];
