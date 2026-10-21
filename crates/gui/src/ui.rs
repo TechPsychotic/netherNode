@@ -151,7 +151,10 @@ impl App {
             );
         container(
             row![
-                image(self.logo.clone()).width(36).height(36).filter_method(FilterMethod::Nearest),
+                image(self.logo.clone())
+                    .width(36)
+                    .height(36)
+                    .filter_method(FilterMethod::Nearest),
                 column![
                     text("netherNode")
                         .size(22)
