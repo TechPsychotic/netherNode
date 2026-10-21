@@ -73,14 +73,21 @@ pub async fn install(
             });
         }
         if let Some(artifact) = lib.artifact() {
-            if artifact.url.is_empty() {
-                continue;
-            }
             let dest = paths
                 .libraries()
                 .join(artifact.path.as_deref().unwrap_or_default());
             if !classpath.contains(&dest) {
                 classpath.push(dest.clone());
+            }
+            // No URL: a file the loader installer generated (e.g. Forge's patched client).
+            if artifact.url.is_empty() {
+                if !dest.exists() {
+                    return Err(other(format!(
+                        "{} is missing; reinstall the mod loader for this instance",
+                        lib.name
+                    )));
+                }
+                continue;
             }
             downloads.push(Download {
                 url: artifact.url,
@@ -102,7 +109,10 @@ pub async fn install(
     } else if !jar.exists() {
         return Err(other(format!("no client jar for '{}'", version.jar)));
     }
-    classpath.push(jar);
+    // A loader version runs the game jar under its own name, as the official launcher does.
+    // Forge relies on this: it skips `${version_name}.jar` when building its module layer.
+    let game_jar = paths.version_jar(&version.id);
+    classpath.push(game_jar.clone());
 
     let logging_arg = match version.logging.as_ref().and_then(|l| l.client.clone()) {
         Some(cfg) => {
@@ -119,6 +129,9 @@ pub async fn install(
     };
 
     download::fetch_all(http, "Libraries", downloads, progress).await?;
+    if game_jar != jar {
+        link_or_copy(&jar, &game_jar)?;
+    }
 
     // Per instance (and guarded by the instance lock), so re-extracting never touches
     // libraries another running game has loaded; Windows refuses to delete those.
@@ -226,4 +239,22 @@ async fn install_assets(
     }
 
     Ok((index_ref.id.clone(), game_assets))
+}
+
+/// Hard-link `from` to `to` (no extra disk space), copying when linking isn't possible.
+/// Replaces `to` if it's out of date.
+fn link_or_copy(from: &Path, to: &Path) -> Result<()> {
+    let same = match (std::fs::metadata(from), std::fs::metadata(to)) {
+        (Ok(a), Ok(b)) => a.len() == b.len(),
+        _ => false,
+    };
+    if same {
+        return Ok(());
+    }
+    ensure_parent(to)?;
+    let _ = std::fs::remove_file(to);
+    if std::fs::hard_link(from, to).is_err() {
+        std::fs::copy(from, to)?;
+    }
+    Ok(())
 }

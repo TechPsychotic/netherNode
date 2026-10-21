@@ -8,7 +8,9 @@ use nethernode_core::account::Accounts;
 use nethernode_core::download::{self, Progress, ProgressFn};
 use nethernode_core::instance::Instance;
 use nethernode_core::launch::{self, QuickPlay};
+use nethernode_core::loader::{self, LoaderKind};
 use nethernode_core::memory::SystemMemory;
+use nethernode_core::mods;
 use nethernode_core::paths::Paths;
 use nethernode_core::version;
 
@@ -42,6 +44,12 @@ enum Command {
     /// Manage instances
     #[command(subcommand)]
     Instance(InstanceCmd),
+    /// Mod loaders: Fabric, Quilt, Forge, NeoForge, OptiFine
+    #[command(subcommand)]
+    Loader(LoaderCmd),
+    /// Mods for an instance (from Modrinth or local files)
+    #[command(subcommand)]
+    Mods(ModsCmd),
     /// Download (if needed) and start an instance
     Launch {
         instance: String,
@@ -92,6 +100,9 @@ enum InstanceCmd {
         /// Use this java executable instead of auto-selecting one
         #[arg(long)]
         java: Option<PathBuf>,
+        /// Also install a mod loader: fabric, quilt, forge or neoforge
+        #[arg(long)]
+        loader: Option<String>,
     },
     /// List instances
     List,
@@ -102,6 +113,66 @@ enum InstanceCmd {
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum LoaderCmd {
+    /// List a loader's versions for a Minecraft version
+    Versions { loader: String, minecraft: String },
+    /// Put a loader on an instance (recommended version unless --version is given)
+    Install {
+        instance: String,
+        loader: String,
+        #[arg(long)]
+        version: Option<String>,
+        /// OptiFine only: the jar downloaded from https://optifine.net/downloads
+        #[arg(long)]
+        jar: Option<PathBuf>,
+    },
+    /// Remove the loader, back to vanilla
+    Remove { instance: String },
+}
+
+#[derive(Subcommand)]
+enum ModsCmd {
+    /// List installed mods
+    List {
+        instance: String,
+    },
+    /// Search Modrinth for mods compatible with the instance
+    Search {
+        instance: String,
+        #[arg(default_value = "")]
+        query: String,
+    },
+    /// Install a Modrinth mod (slug or id) plus its required dependencies
+    Add {
+        instance: String,
+        project: String,
+    },
+    /// Copy a mod jar into the instance
+    AddFile {
+        instance: String,
+        file: PathBuf,
+    },
+    Enable {
+        instance: String,
+        file: String,
+    },
+    Disable {
+        instance: String,
+        file: String,
+    },
+    Remove {
+        instance: String,
+        file: String,
+    },
+}
+
+fn parse_loader(name: &str) -> Result<LoaderKind> {
+    LoaderKind::parse(name).ok_or_else(|| {
+        anyhow::anyhow!("unknown loader '{name}' (fabric, quilt, forge, neoforge, optifine)")
+    })
 }
 
 #[tokio::main]
@@ -173,7 +244,9 @@ async fn main() -> Result<()> {
                 java,
                 low_end,
                 no_low_end,
+                loader,
             } => {
+                let loader = loader.as_deref().map(parse_loader).transpose()?;
                 let id = resolve_version_alias(&paths, &version).await?;
                 let low_end = low_end || (!no_low_end && SystemMemory::current().is_low());
                 let mut instance = Instance::create(&paths, &name, &id, low_end)?;
@@ -181,6 +254,17 @@ async fn main() -> Result<()> {
                 instance.min_memory_mb = min_memory;
                 instance.java_path = java;
                 instance.save(&paths)?;
+                if let Some(kind) = loader {
+                    loader::apply(
+                        &download::client(),
+                        &paths,
+                        &mut instance,
+                        kind,
+                        None,
+                        &progress_bars(),
+                    )
+                    .await?;
+                }
                 println!(
                     "created '{}' ({}) at {}",
                     instance.name,
@@ -204,7 +288,15 @@ async fn main() -> Result<()> {
                     let memory = i
                         .max_memory_mb
                         .map_or("auto".to_string(), |m| format!("{m} MB"));
-                    println!("{:<24} {:<16} {memory}", i.name, i.version);
+                    let loader = i.loader.as_ref().map_or("vanilla".to_string(), |l| {
+                        format!("{} {}", l.kind, l.version)
+                    });
+                    println!(
+                        "{:<24} {:<10} {:<24} {memory}",
+                        i.name,
+                        i.minecraft_version(),
+                        loader
+                    );
                 }
             }
             InstanceCmd::Delete { name, yes } => {
@@ -215,6 +307,116 @@ async fn main() -> Result<()> {
                 println!("deleted {name}");
             }
         },
+
+        Command::Loader(cmd) => {
+            let http = download::client();
+            match cmd {
+                LoaderCmd::Versions {
+                    loader: kind,
+                    minecraft,
+                } => {
+                    let kind = parse_loader(&kind)?;
+                    let versions = loader::versions(&http, kind, &minecraft).await?;
+                    if versions.is_empty() {
+                        println!("{kind} has no release for Minecraft {minecraft}");
+                    }
+                    for v in versions.iter().take(20) {
+                        println!("{}{}", v.version, if v.stable { "  (stable)" } else { "" });
+                    }
+                }
+                LoaderCmd::Install {
+                    instance,
+                    loader: kind,
+                    version,
+                    jar,
+                } => {
+                    let kind = parse_loader(&kind)?;
+                    let mut instance = Instance::load(&paths, &instance)?;
+                    if kind == LoaderKind::OptiFine {
+                        let jar = jar.ok_or_else(|| anyhow::anyhow!(
+                            "download OptiFine from https://optifine.net/downloads and pass it with --jar"
+                        ))?;
+                        loader::apply_optifine(
+                            &http,
+                            &paths,
+                            &mut instance,
+                            &jar,
+                            &progress_bars(),
+                        )
+                        .await?;
+                    } else {
+                        loader::apply(
+                            &http,
+                            &paths,
+                            &mut instance,
+                            kind,
+                            version.as_deref(),
+                            &progress_bars(),
+                        )
+                        .await?;
+                    }
+                    println!("'{}' now runs {}", instance.name, instance.version);
+                }
+                LoaderCmd::Remove { instance } => {
+                    let mut instance = Instance::load(&paths, &instance)?;
+                    loader::remove(&paths, &mut instance)?;
+                    println!("'{}' is vanilla {} again", instance.name, instance.version);
+                }
+            }
+        }
+
+        Command::Mods(cmd) => {
+            let http = download::client();
+            match cmd {
+                ModsCmd::List { instance } => {
+                    let instance = Instance::load(&paths, &instance)?;
+                    for m in mods::list(&paths, &instance)? {
+                        let version = m.info.as_ref().map_or("", |i| i.version_number.as_str());
+                        let state = if m.enabled { " " } else { "x" };
+                        println!(
+                            "[{state}] {:<32} {:<20} {}",
+                            m.display_name(),
+                            version,
+                            m.file_name
+                        );
+                    }
+                }
+                ModsCmd::Search { instance, query } => {
+                    let instance = Instance::load(&paths, &instance)?;
+                    let results = mods::search(&http, &instance, &query, 0).await?;
+                    for hit in results.hits {
+                        println!(
+                            "{:<28} {:>11} downloads  {}",
+                            hit.slug, hit.downloads, hit.description
+                        );
+                    }
+                }
+                ModsCmd::Add { instance, project } => {
+                    let instance = Instance::load(&paths, &instance)?;
+                    let added =
+                        mods::install(&http, &paths, &instance, &project, &progress_bars()).await?;
+                    if added.is_empty() {
+                        println!("already installed");
+                    }
+                    for title in added {
+                        println!("installed {title}");
+                    }
+                }
+                ModsCmd::AddFile { instance, file } => {
+                    let instance = Instance::load(&paths, &instance)?;
+                    println!("added {}", mods::add_file(&paths, &instance, &file)?);
+                }
+                ModsCmd::Enable { instance, file } => {
+                    mods::set_enabled(&paths, &Instance::load(&paths, &instance)?, &file, true)?;
+                }
+                ModsCmd::Disable { instance, file } => {
+                    mods::set_enabled(&paths, &Instance::load(&paths, &instance)?, &file, false)?;
+                }
+                ModsCmd::Remove { instance, file } => {
+                    mods::remove(&paths, &Instance::load(&paths, &instance)?, &file)?;
+                }
+            }
+        }
 
         Command::Launch {
             instance,

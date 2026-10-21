@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, other};
+use crate::loader::Loader;
 use crate::paths::Paths;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +24,12 @@ pub struct Instance {
     pub jvm_args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<(u32, u32)>,
+    /// The mod loader, if any. `version` is then the loader's version id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loader: Option<Loader>,
+    /// The Minecraft version, when it differs from `version` (i.e. with a loader).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minecraft: Option<String>,
 }
 
 /// Names must be valid folder names on Windows, macOS and Linux alike.
@@ -58,7 +65,17 @@ impl Instance {
             max_memory_mb: None,
             jvm_args: Vec::new(),
             resolution: None,
+            loader: None,
+            minecraft: None,
         })
+    }
+
+    pub fn minecraft_version(&self) -> &str {
+        self.minecraft.as_deref().unwrap_or(&self.version)
+    }
+
+    pub fn mods_dir(&self, paths: &Paths) -> PathBuf {
+        self.game_dir(paths).join("mods")
     }
 
     pub fn dir(&self, paths: &Paths) -> PathBuf {
