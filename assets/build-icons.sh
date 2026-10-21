@@ -10,7 +10,7 @@ rm -rf "$out" && mkdir -p "$out/png"
 render() { # render <size>
     local src=icon.svg
     [ "$1" -le 32 ] && src=icon-small.svg
-    magick -background none -density 384 "$src" -resize "$1x$1" -strip "PNG32:$out/png/$1.png"
+    magick -background none -density 3072 "$src" -filter point -resize "$1x$1" -strip "PNG32:$out/png/$1.png"
 }
 for size in 16 24 32 48 64 128 256 512 1024; do render "$size"; done
 
