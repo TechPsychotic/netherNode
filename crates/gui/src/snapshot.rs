@@ -128,7 +128,7 @@ pub fn update(app: &mut App, step: Step) -> Task<Message> {
                     if let Ok(server) = std::env::var("NETHERNODE_SNAPSHOT_SERVER") {
                         send(app, Message::StartServer(server));
                     }
-                    45_000
+                    90_000
                 }
                 "server-invite" => {
                     if let Ok(server) = std::env::var("NETHERNODE_SNAPSHOT_SERVER") {

@@ -1,4 +1,4 @@
-**Test build. Not code-signed yet**: see "Installing" below.
+**netherNode 1.0**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
 
 ## Downloads
 

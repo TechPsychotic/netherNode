@@ -96,6 +96,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: netherNode ${{ github.ref_name }}
-          prerelease: true
+          # 0.x tags are test builds; 1.0 and later are full releases.
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
           body_path: packaging/release-notes.md
           files: dist/*
