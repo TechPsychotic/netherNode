@@ -53,6 +53,7 @@ jobs:
           New-Item -ItemType Directory -Force dist/netherNode | Out-Null
           Copy-Item target/release/nethernode-gui.exe, target/release/nethernode.exe dist/netherNode/
           Copy-Item packaging/README-release.txt dist/netherNode/README.txt
+          Copy-Item LICENSE dist/netherNode/LICENSE.txt
           Compress-Archive -Path dist/netherNode -DestinationPath "dist/netherNode-$env:TAG-windows-x64.zip"
 
       - name: Package (macOS)
@@ -72,6 +73,7 @@ jobs:
           cp packaging/linux/install.sh packaging/linux/nethernode.desktop dist/netherNode/
           cp -r assets/icons/png dist/netherNode/icons/
           cp packaging/README-release.txt dist/netherNode/README.txt
+          cp LICENSE dist/netherNode/LICENSE
           tar -C dist -czf "dist/netherNode-$TAG-linux-x64.tar.gz" netherNode
 
       - uses: actions/upload-artifact@v4

@@ -150,11 +150,25 @@ Pushing a `v*` tag builds Windows, macOS and Linux releases through GitHub Actio
 
 **How do skins work without a login?** netherNode runs a small skin service on your own computer and starts the game with [authlib-injector](https://github.com/yushijinhun/authlib-injector), which sends the game's skin lookups there instead of to Mojang. authlib-injector is open source (AGPL-3.0); netherNode downloads it once from its official site and checks its checksum. Turn skins off in **Settings** if you prefer.
 
-**Does it include Minecraft's textures?** No. The launcher reads textures from the game files it downloads from Mojang for you, and uses its own artwork until then.
+**My friend sees me with a default skin.** Both of you need netherNode 1.1 or newer with skins on (Settings), and your friend has to join through *Join friend*, which is how your skin reaches them. Players on servers hosted in netherNode get default skins for now, because those servers run in offline mode.
+
+**Join friend says no one is sharing with that code.** Check the four words with your friend; spaces or dashes between them both work, and the first four letters of each word are enough. The words only work while your friend is sharing; a new session gives new words. If the lookup service can't be reached, ask your friend for **Copy full code** and paste that instead.
+
+**Can friends who don't use netherNode join me?** Your server, yes, if they can reach it (for example on your LAN, or with your own port forwarding): it runs in offline mode. *Invite friends* over the internet needs netherNode on both sides.
+
+**My computer has little RAM. Will it run?** Yes. netherNode sizes the game's memory to what your computer has and what's free, gives low-RAM machines lighter game settings, and uses a lighter launcher renderer at 4 GB or less. Close other programs before a big modpack, and see the crash message if the game runs out of memory.
+
+**The game crashed. What now?** netherNode shows the likely cause and a fix on the instance. The full log is under the instance's **Folder** (`logs/latest.log`, and `crash-reports/`).
+
+**Does netherNode collect any data?** No. It talks to Mojang (game files and Java), Modrinth (mods and modpacks), the mod loader and Paper sites (when you install those), authlib-injector's site (once, for skins) and iroh's relay and lookup services (only for *Invite friends* / *Join friend*). There are no accounts, analytics or telemetry.
 
 ## Credits
 
 The interface uses the public-domain [Minecraft font](https://www.fontspace.com/minecraft-font-f28180) with [Inter](https://rsms.me/inter/) and [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (SIL Open Font License); see `assets/fonts/`. Networking for *Invite friends* is built on [iroh](https://iroh.computer). Short codes use the [BIP-39](https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt) English word list. In-game skins use [authlib-injector](https://github.com/yushijinhun/authlib-injector), downloaded at runtime.
+
+## License
+
+netherNode is free software under the [GNU General Public License v3.0](LICENSE) (or any later version). You can use, study, share and change it; if you distribute a changed version, it has to be under the GPL too, with its source code. Bundled fonts keep their own licenses (see `assets/fonts/`). Minecraft is a trademark of Mojang AB; netherNode is not affiliated with Mojang or Microsoft.
 
 ## Roadmap
 
