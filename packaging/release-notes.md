@@ -1,4 +1,4 @@
-**netherNode 1.0**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
+**netherNode 1.1**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
 
 ## Downloads
 
@@ -13,6 +13,14 @@
 - **Windows:** unzip, run `nethernode-gui.exe`. If SmartScreen appears: *More info → Run anyway*.
 - **macOS:** open the `.dmg`, drag netherNode to Applications, then right-click it → *Open* → *Open* (first time only). If macOS says it's damaged: `xattr -dr com.apple.quarantine /Applications/netherNode.app`.
 - **Linux:** extract, then run `./install.sh` (adds it to the app menu) or `./nethernode-gui` directly.
+
+## New in 1.1
+
+- **Custom skins and capes** for offline accounts (Accounts → Choose skin…, classic or slim arms). You and friends who join through netherNode see each other's skins in game. Uses authlib-injector, an open-source helper downloaded once from its official site; turn it off in Settings.
+- **Four-word invite codes** like `maple-orbit-tunnel-frog`, easy to read out loud. The long code still works (*Copy full code*).
+- *Invite friends* is always on the instance; server settings scroll, so every option fits.
+- The interface uses a Minecraft-style font.
+- Everyone playing together needs 1.1: it can't connect to 1.0.
 
 ## What's in it
 
@@ -29,6 +37,8 @@
 
 ## Please check when testing
 
+- Skins: choose one under Accounts, play, and check it shows in third person (F5) — and that a friend who joins your LAN world sees it.
+- Invite friends with the four words: the friend types them in Join friend.
 - Windows: all text is readable and nothing turns dark.
 - The nether portal background animates (Settings → Launcher graphics).
 - An OptiFine instance (one-click alternative) launches.

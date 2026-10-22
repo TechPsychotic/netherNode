@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -32,6 +32,11 @@ const INJECTOR_URL: &str =
     "https://authlib-injector.yushi.moe/artifact/56/authlib-injector-1.2.8.jar";
 const INJECTOR_SHA256: &str = "9c7f4343e6c82034958ffb48c14a2cb0c85928be7283103ce17da00c6d5a7b10";
 const MAX_PNG: usize = 256 * 1024;
+/// The key every netherNode signs skin data with. Minecraft only shows another player's
+/// skin if its signature checks out, and authlib-injector trusts a single key, so all
+/// installs share this one. It's public on purpose: it only vouches for textures served from
+/// 127.0.0.1, so a forged signature can at worst show a different local skin.
+const SIGNING_KEY: &str = include_str!("skins-key.pem");
 /// The skin service's usual port. Texture URLs contain it, and friends' games fetch the
 /// same URLs from their own service, so it should be the same on every PC.
 pub const PORT: u16 = 47_811;
@@ -95,7 +100,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// Skins on disk: `<data>/skins/{index.json,textures/<sha256>.png,key.pem}`.
+/// Skins on disk: `<data>/skins/{index.json,textures/<sha256>.png}`.
 #[derive(Debug, Clone)]
 pub struct SkinStore {
     dir: PathBuf,
@@ -260,23 +265,6 @@ impl SkinStore {
             .into_iter()
             .find(|(name, _)| offline_uuid(name).replace('-', "") == wanted)
     }
-
-    fn key(&self) -> Result<RsaPrivateKey> {
-        let file = self.dir.join("key.pem");
-        if let Ok(pem) = std::fs::read_to_string(&file)
-            && let Ok(key) = RsaPrivateKey::from_pkcs8_pem(&pem)
-        {
-            return Ok(key);
-        }
-        let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)
-            .map_err(|e| other(format!("key: {e}")))?;
-        ensure_parent(&file)?;
-        let pem = key
-            .to_pkcs8_pem(LineEnding::LF)
-            .map_err(|e| other(format!("key: {e}")))?;
-        std::fs::write(&file, pem.as_bytes())?;
-        Ok(key)
-    }
 }
 
 /// authlib-injector's jar, downloaded once and checked against the pinned SHA-256.
@@ -331,7 +319,7 @@ pub async fn serve(
     paths: &Paths,
 ) -> Result<(u16, impl std::future::Future<Output = ()> + Send + 'static)> {
     let store = SkinStore::new(paths);
-    let key = store.key()?;
+    let key = RsaPrivateKey::from_pkcs8_pem(SIGNING_KEY).map_err(|e| other(format!("key: {e}")))?;
     let public_pem = key
         .to_public_key()
         .to_public_key_pem(LineEnding::LF)

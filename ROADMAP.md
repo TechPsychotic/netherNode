@@ -37,7 +37,9 @@ Short codes: the host gets four everyday words (for example `maple-orbit-tunnel-
 
 Custom skins and capes per account (Accounts screen or `nethernode account skin`). A local skin service plus authlib-injector (open source, downloaded at a pinned version and checked by SHA-256, never bundled) shows them in game, and Invite friends exchanges skins between friends. Nothing logs in anywhere. Verified: the game loads the signed profile, LAN-style logins pass through the local `hasJoined`, and a real client downloaded its custom skin in a world.
 
-**Open question:** friends see each other's skins only if all netherNode installs sign skin data with the same key (Minecraft rejects other players' skins it can't verify). Today each install has its own key, so you see your own skin and, as host, your friends' skins; joiners see default skins for other players.
+All installs sign skin data with one shared key built into the app (Minecraft only shows other players' skins it can verify, and authlib-injector trusts a single key). It's public on purpose: it only vouches for textures served from 127.0.0.1, and the skin service listens on a fixed port (47811) so texture URLs work on every PC.
+
+**Next:** skins on netherNode-hosted servers (they run in offline mode, so players there get default skins).
 
 ## Servers on this PC (done)
 
