@@ -33,9 +33,21 @@ pub struct LaunchCommand {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub heap: HeapPlan,
+    /// Where the main class sits in `args`; JVM options go before it.
+    pub main_class_at: usize,
+    /// authlib-injector's jar and the data folder whose skins to serve, when skins are on.
+    pub skins: Option<(PathBuf, Paths)>,
 }
 
 impl LaunchCommand {
+    /// Add JVM options (they must come before the main class).
+    pub fn add_jvm_args(&mut self, extra: impl IntoIterator<Item = String>) {
+        let at = self.main_class_at.min(self.args.len());
+        let before = self.args.len();
+        self.args.splice(at..at, extra);
+        self.main_class_at += self.args.len() - before;
+    }
+
     pub fn to_command(&self) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(&self.java);
         // If the launcher goes away, the game goes with it instead of lingering unseen.
@@ -83,6 +95,35 @@ pub async fn run(
         tail.push_back(line.text.clone());
         on_line(line);
     };
+
+    // Skins: start the local skin service for as long as the game runs.
+    let mut service = None;
+    let with_skins;
+    let cmd = match &cmd.skins {
+        Some((injector, paths)) => match crate::skins::serve(paths).await {
+            Ok((port, serve)) => {
+                service = Some(crate::skins::AbortOnDrop(tokio::spawn(serve)));
+                let mut c = cmd.clone();
+                c.add_jvm_args(crate::skins::agent_args(injector, port));
+                with_skins = c;
+                &with_skins
+            }
+            Err(e) => {
+                let text = format!("skins are off for this run: {e}");
+                on_line(
+                    LogLine {
+                        level: "WARN".into(),
+                        thread: "netherNode".into(),
+                        text,
+                    },
+                    &mut tail,
+                );
+                cmd
+            }
+        },
+        None => cmd,
+    };
+    let _service = service;
 
     let mut child = cmd
         .to_command()
@@ -231,7 +272,7 @@ pub async fn prepare(
         &env,
         quick_play.as_ref(),
     );
-    let args = build_args(
+    let (args, main_class_at) = build_args(
         instance,
         &version,
         &installed,
@@ -240,11 +281,25 @@ pub async fn prepare(
         quick_play.as_ref(),
         &heap,
     );
+    // Skins are a nice-to-have: if authlib-injector can't be fetched, play without them.
+    let skins = if crate::settings::Settings::load().skins {
+        match crate::skins::ensure_injector(&http, paths).await {
+            Ok(jar) => Some((jar, paths.clone())),
+            Err(e) => {
+                eprintln!("skins are off for this run: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     Ok(LaunchCommand {
         java,
         args,
         cwd: game_dir,
         heap,
+        main_class_at,
+        skins,
     })
 }
 
@@ -379,7 +434,7 @@ fn build_args(
     vars: &HashMap<&'static str, String>,
     quick_play: Option<&QuickPlay>,
     heap: &HeapPlan,
-) -> Vec<String> {
+) -> (Vec<String>, usize) {
     // Heap flags in the instance's own JVM arguments win over ours.
     let user_sets = |flag: &str| instance.jvm_args.iter().any(|a| a.starts_with(flag));
     let mut args = Vec::new();
@@ -425,6 +480,7 @@ fn build_args(
     }
     args.extend(instance.jvm_args.iter().cloned());
 
+    let main_class_at = args.len();
     args.push(version.main_class.clone().unwrap_or_default());
 
     let game: Vec<String> = match (&version.arguments, &version.minecraft_arguments) {
@@ -456,7 +512,7 @@ fn build_args(
         let (host, port) = server.split_once(':').unwrap_or((server, "25565"));
         args.extend(["--server".into(), host.into(), "--port".into(), port.into()]);
     }
-    args
+    (args, main_class_at)
 }
 
 #[cfg(test)]

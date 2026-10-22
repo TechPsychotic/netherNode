@@ -24,7 +24,7 @@ const BLOCK: f32 = 40.0;
 const LOG_VISIBLE: usize = 400;
 
 /// Bundled fonts (see `fonts` in main.rs), so text never depends on what the OS has.
-pub const UI_FONT: Font = Font::with_name("Inter");
+pub const UI_FONT: Font = Font::with_name("Minecraft");
 const BOLD: Font = Font {
     weight: iced::font::Weight::Bold,
     ..UI_FONT
@@ -170,7 +170,7 @@ impl App {
                         .size(22)
                         .font(BOLD)
                         .color(theme::VIOLET_BRIGHT),
-                    text("Offline Minecraft launcher")
+                    text("just another minecraft launcher")
                         .size(12)
                         .color(theme::MUTED),
                 ]
@@ -395,31 +395,37 @@ impl App {
             .spacing(16)
             .align_y(Alignment::Center);
 
-        // Once the world is open to LAN, it can be shared over the internet.
-        let invite: Option<Element<'_, Message>> = match self.runs.get(&name) {
-            Some(run) if run.lan_port.is_some() && self.host_share.is_none() => Some(
-                button(text("Invite friends").size(14).font(BOLD))
-                    .padding([8, 16])
-                    .style(theme::play)
-                    .on_press(Message::InviteFriends(name.clone()))
-                    .into(),
-            ),
-            _ => None,
-        };
+        // Always shown, so it's easy to find; it works once the world is open to LAN.
+        let lan_open = self.runs.get(&name).is_some_and(|r| r.lan_port.is_some());
+        let invite: Option<Element<'_, Message>> = self.host_share.is_none().then(|| {
+            button(text("Invite friends").size(14).font(BOLD))
+                .padding([8, 16])
+                .style(theme::play)
+                .on_press_maybe(lan_open.then(|| Message::InviteFriends(name.clone())))
+                .into()
+        });
+        // While the game runs, the console area already explains Open to LAN.
+        let invite_hint = (!self.runs.contains_key(&name) && self.host_share.is_none()).then(|| {
+            text("To invite friends: play, load a world, then Esc → Open to LAN. Friends use Join friend.")
+                .size(12)
+                .color(theme::MUTED)
+        });
         let actions = row![
             small_button("Mods").on_press(Message::ShowMods(name.clone())),
             small_button("Edit").on_press_maybe((!busy).then(|| Message::ShowEdit(name.clone()))),
             small_button("Folder").on_press(Message::OpenFolder(instance.game_dir(&self.paths))),
-            space::horizontal(),
+        ]
+        .extend(invite)
+        .push(space::horizontal())
+        .push(
             button(text(if deleting { "Really delete?" } else { "Delete" }).size(14))
                 .padding([8, 14])
                 .style(theme::danger_button)
                 .on_press_maybe((!busy).then(|| Message::Delete(name.clone()))),
-        ]
-        .extend(invite)
+        )
         .spacing(8);
 
-        let mut body = column![header, actions].spacing(14);
+        let mut body = column![header, actions].push(invite_hint).spacing(14);
         if self
             .runs
             .get(&name)
@@ -1069,9 +1075,6 @@ impl App {
                 .spacing(6),
             );
         }
-        if let Some(form) = &view.settings {
-            body = body.push(server_settings(form, run.is_some()));
-        }
         if ready {
             body = body.push(
                 text(format!(
@@ -1121,7 +1124,14 @@ impl App {
             .style(theme::console)
             .into(),
         };
-        body = body.push(console);
+        // Settings take the console's place (and scroll), so every option fits.
+        body = body.push(match &view.settings {
+            Some(form) => scrollable(server_settings(form, run.is_some()))
+                .style(theme::scroll)
+                .height(Length::Fill)
+                .into(),
+            None => console,
+        });
         if run.is_some() {
             body = body.push(
                 row![
@@ -1261,11 +1271,19 @@ impl App {
                             share.instance
                         ))
                         .size(13),
-                        text(code).size(13).font(MONO).color(theme::VIOLET_BRIGHT),
+                        text(code).size(18).font(BOLD).color(theme::VIOLET_BRIGHT),
                     ]
                     .spacing(4)
                     .width(Length::Fill),
                     small_button("Copy code").on_press(Message::CopyText(code.clone())),
+                    // The full code, for when the short one can't be looked up.
+                    small_button("Copy full code").on_press_maybe(
+                        share
+                            .full_code
+                            .clone()
+                            .filter(|full| full != code)
+                            .map(Message::CopyText),
+                    ),
                     button(text("Stop sharing").size(14))
                         .padding([8, 14])
                         .style(theme::danger_button)
@@ -1503,6 +1521,16 @@ impl App {
                     .on_toggle(Message::SettingsAnimation),
             ]
             .spacing(8),
+            column![
+                text("In game").size(13).color(theme::MUTED),
+                checkbox(form.skins)
+                    .label("Custom skins (yours and your friends')")
+                    .on_toggle(Message::SettingsSkins),
+                text("Choose skins under Accounts. Uses authlib-injector, an open-source helper downloaded once from its official site. Nothing logs in anywhere.")
+                    .size(12)
+                    .color(theme::MUTED),
+            ]
+            .spacing(8),
             row![
                 small_button("Open game files folder").on_press(Message::OpenFolder(self.paths.root.clone())),
                 small_button("Open instances folder").on_press(Message::OpenFolder(self.paths.instances())),
@@ -1624,15 +1652,59 @@ impl App {
     fn accounts_form<'a>(&'a self, name: &'a str) -> Element<'a, Message> {
         let mut list = column![].spacing(8);
         for account in &self.accounts.accounts {
+            use nethernode_core::skins::Model;
             let is_default = self.accounts.default.as_ref() == Some(&account.name);
+            let skin = self.skins.get(&account.name);
+            let face: Element<'_, Message> = match skin.and_then(|s| s.face.clone()) {
+                Some(face) => image(face)
+                    .width(40)
+                    .height(40)
+                    .filter_method(image::FilterMethod::Nearest)
+                    .into(),
+                None => container(text("?").size(18).color(theme::MUTED))
+                    .center(40)
+                    .style(theme::row_item)
+                    .into(),
+            };
+            let name = account.name.clone();
+            let skin_controls: Element<'_, Message> = match skin {
+                Some(skin) => row![
+                    small_button("Change skin…").on_press(Message::PickSkin(name.clone(), false)),
+                    button(text("Classic").size(13))
+                        .padding([6, 12])
+                        .style(theme::segment(skin.model == Model::Classic))
+                        .on_press(Message::SetSkinModel(name.clone(), Model::Classic)),
+                    button(text("Slim").size(13))
+                        .padding([6, 12])
+                        .style(theme::segment(skin.model == Model::Slim))
+                        .on_press(Message::SetSkinModel(name.clone(), Model::Slim)),
+                    small_button(if skin.cape {
+                        "Change cape…"
+                    } else {
+                        "Add cape…"
+                    })
+                    .on_press(Message::PickSkin(name.clone(), true)),
+                    small_button("Default skin").on_press(Message::RemoveSkin(name.clone())),
+                ]
+                .spacing(6)
+                .wrap()
+                .vertical_spacing(6)
+                .into(),
+                None => row![
+                    small_button("Choose skin…").on_press(Message::PickSkin(name.clone(), false))
+                ]
+                .into(),
+            };
             list = list.push(
                 container(
                     row![
+                        face,
                         column![
                             text(&account.name).size(16).font(BOLD),
                             text(&account.uuid).size(11).font(MONO).color(theme::MUTED),
+                            skin_controls,
                         ]
-                        .spacing(2)
+                        .spacing(6)
                         .width(Length::Fill),
                         if is_default {
                             chip("Default", theme::SUCCESS)
@@ -1656,7 +1728,7 @@ impl App {
         let can_add = !name.trim().is_empty();
         column![
             text("Accounts").size(26).font(BOLD),
-            text("Offline accounts only: no login and no internet check. Your name and UUID are what offline servers and LAN worlds see.")
+            text("Offline accounts only: no login and no internet check. Your name and UUID are what offline servers and LAN worlds see. Skins show in game for you and for friends who join with netherNode.")
                 .size(13)
                 .color(theme::MUTED),
             list,
@@ -2124,14 +2196,13 @@ fn join_friend_form<'a>(code: &'a str, error: Option<&'a str>) -> Element<'a, Me
         ]
         .spacing(10)
         .align_y(Alignment::Center),
-        text("Paste the code your friend got from \"Invite friends\". No port forwarding needed: netherNode connects directly when it can, otherwise through an encrypted relay.")
+        text("Type the four words your friend got from \"Invite friends\" (or paste their full code). No port forwarding needed: netherNode connects directly when it can, otherwise through an encrypted relay.")
             .size(13)
             .color(theme::MUTED),
-        text_input("Join code", code)
+        text_input("e.g. maple orbit tunnel frog", code)
             .on_input(Message::JoinCodeInput)
             .on_submit_maybe(can_join.then_some(Message::StartJoin))
             .style(theme::input)
-            .font(MONO)
             .padding(10),
     ]
     .spacing(16);

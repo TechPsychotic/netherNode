@@ -143,7 +143,8 @@ pub type JoinReply = Arc<std::sync::Mutex<Option<oneshot::Sender<bool>>>>;
 /// Host-side sharing events, made cloneable for iced messages.
 #[derive(Debug, Clone)]
 pub enum ShareEvent {
-    Ready(String),
+    /// The code to show (four words when possible) and the full code.
+    Ready(String, String),
     /// A friend with the right code is asking to join; answer through the sender.
     Request(String, JoinReply),
     Joined(String),
@@ -152,16 +153,24 @@ pub enum ShareEvent {
 }
 
 /// Share a world opened to LAN on `port` until `stop` fires.
-pub fn host_share(port: u16, stop: oneshot::Receiver<()>) -> impl Stream<Item = ShareEvent> {
+pub fn host_share(
+    paths: Paths,
+    port: u16,
+    stop: oneshot::Receiver<()>,
+) -> impl Stream<Item = ShareEvent> {
     use nethernode_core::share::{self, HostEvent};
     let (tx, rx) = mpsc::unbounded();
     let events = tx.clone();
     let run = async move {
         let result = share::host(
             port,
+            nethernode_core::skins::for_sharing(&paths),
             move |event| {
                 let event = match event {
-                    HostEvent::Ready(code) => ShareEvent::Ready(code.to_string()),
+                    HostEvent::Ready { code, short } => ShareEvent::Ready(
+                        short.map_or_else(|| code.to_string(), |s| s.to_string()),
+                        code.to_string(),
+                    ),
                     HostEvent::Request { friend, reply } => {
                         ShareEvent::Request(friend, Arc::new(std::sync::Mutex::new(Some(reply))))
                     }
@@ -187,20 +196,26 @@ pub enum JoinUpdate {
 
 /// Join a friend's world until `stop` fires or the host ends it.
 pub fn join_share(
-    code: nethernode_core::share::JoinCode,
+    paths: Paths,
+    code: String,
     stop: oneshot::Receiver<()>,
 ) -> impl Stream<Item = JoinUpdate> {
     let (tx, rx) = mpsc::unbounded();
     let events = tx.clone();
     let run = async move {
-        let result = nethernode_core::share::join(
-            &code,
-            "Friend's world (netherNode)",
-            move |event| {
-                let _ = events.unbounded_send(JoinUpdate::Status(event));
-            },
-            stop.map(|_| ()),
-        )
+        let result = async {
+            let code = nethernode_core::invite::resolve(&code).await?;
+            nethernode_core::share::join(
+                &code,
+                "Friend's world (netherNode)",
+                nethernode_core::skins::for_sharing(&paths),
+                move |event| {
+                    let _ = events.unbounded_send(JoinUpdate::Status(event));
+                },
+                stop.map(|_| ()),
+            )
+            .await
+        }
         .await;
         let _ = tx.unbounded_send(JoinUpdate::Ended(result.map_err(|e| e.to_string())));
     };

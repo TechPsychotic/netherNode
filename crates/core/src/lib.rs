@@ -8,6 +8,7 @@ pub mod download;
 pub mod error;
 pub mod install;
 pub mod instance;
+pub mod invite;
 pub mod java;
 pub mod launch;
 pub mod loader;
@@ -20,6 +21,7 @@ pub mod rules;
 pub mod server;
 pub mod settings;
 pub mod share;
+pub mod skins;
 pub mod version;
 pub mod worlds;
 

@@ -47,6 +47,9 @@ pub fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         // Bundled fonts: some Windows setups (and Wine) give iced no usable system font,
         // which left text invisible. These also make every OS look the same.
+        .font(include_bytes!("../../../assets/fonts/Minecraft-Regular.otf").as_slice())
+        .font(include_bytes!("../../../assets/fonts/Minecraft-Bold.otf").as_slice())
+        // Inter stays loaded as the fallback for symbols the pixel font lacks (× ✓ ▶ …).
         .font(include_bytes!("../../../assets/fonts/Inter-Regular.ttf").as_slice())
         .font(include_bytes!("../../../assets/fonts/Inter-Bold.ttf").as_slice())
         .font(include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf").as_slice())
@@ -76,11 +79,37 @@ fn cpu_renderer() -> bool {
     std::env::var("ICED_BACKEND").is_ok_and(|b| b.starts_with("tiny-skia"))
 }
 
+/// What the Accounts screen shows about an account's custom skin.
+pub struct SkinInfo {
+    model: nethernode_core::skins::Model,
+    face: Option<iced::widget::image::Handle>,
+    cape: bool,
+}
+
+fn load_skins(paths: &Paths, accounts: &Accounts) -> HashMap<String, SkinInfo> {
+    let store = nethernode_core::skins::SkinStore::new(paths);
+    accounts
+        .accounts
+        .iter()
+        .filter_map(|a| store.get(&a.name).map(|r| (a.name.clone(), r)))
+        .map(|(name, r)| {
+            let info = SkinInfo {
+                model: r.model,
+                face: textures::skin_face(&r.skin),
+                cape: r.cape.is_some(),
+            };
+            (name, info)
+        })
+        .collect()
+}
+
 pub struct App {
     paths: Paths,
     instances: Vec<Instance>,
     selected: Option<String>,
     accounts: Accounts,
+    /// Custom skins of this PC's accounts, by account name.
+    skins: HashMap<String, SkinInfo>,
     screen: Screen,
     /// The version manifest, once it has loaded.
     versions: Option<Vec<ManifestEntry>>,
@@ -133,7 +162,10 @@ pub struct HostShare {
     instance: String,
     /// Sharing a server (rather than a world opened to LAN in a game).
     is_server: bool,
+    /// What to read out: four words, or the full code if those couldn't be published.
     code: Option<String>,
+    /// The full code, which always works.
+    full_code: Option<String>,
     stop: Option<oneshot::Sender<()>>,
     /// Friends waiting for Allow/Deny.
     requests: Vec<(String, game::JoinReply)>,
@@ -274,6 +306,7 @@ pub struct SettingsForm {
     move_files: bool,
     renderer: nethernode_core::settings::Renderer,
     animated_background: bool,
+    skins: bool,
     /// Files are being moved.
     busy: bool,
 }
@@ -400,6 +433,11 @@ pub enum Message {
     AddAccount,
     RemoveAccount(String),
     SetDefaultAccount(String),
+    /// Open a file picker for an account's skin (`false`) or cape (`true`).
+    PickSkin(String, bool),
+    SkinPicked(String, bool, Option<PathBuf>),
+    SetSkinModel(String, nethernode_core::skins::Model),
+    RemoveSkin(String),
     ShowMods(String),
     ModsTab(ModsTab),
     ModsQuery(String),
@@ -479,6 +517,7 @@ pub enum Message {
     SettingsMoveFiles(bool),
     SettingsRenderer(nethernode_core::settings::Renderer),
     SettingsAnimation(bool),
+    SettingsSkins(bool),
     SaveSettings,
     SettingsSaved(Result<Settings, String>),
     /// Debug builds only: screenshot each screen to `$NETHERNODE_SNAPSHOT` (see snapshot.rs).
@@ -522,6 +561,7 @@ impl App {
         let mut app = Self {
             selected: instances.first().map(|i| i.name.clone()),
             instances,
+            skins: load_skins(&paths, &accounts),
             accounts,
             screen: Screen::Home,
             versions: None,
@@ -1447,18 +1487,25 @@ impl App {
                     is_server: false,
                     instance: name,
                     code: None,
+                    full_code: None,
                     stop: Some(stop_tx),
                     requests: Vec::new(),
                     friends: Vec::new(),
                 });
-                return Task::run(game::host_share(port, stop_rx), Message::Share);
+                return Task::run(
+                    game::host_share(self.paths.clone(), port, stop_rx),
+                    Message::Share,
+                );
             }
             Message::Share(event) => {
                 let Some(share) = self.host_share.as_mut() else {
                     return Task::none();
                 };
                 match event {
-                    game::ShareEvent::Ready(code) => share.code = Some(code),
+                    game::ShareEvent::Ready(code, full) => {
+                        share.code = Some(code);
+                        share.full_code = Some(full);
+                    }
                     game::ShareEvent::Request(friend, reply) => {
                         let world = share.instance.clone();
                         share.requests.push((friend, reply));
@@ -1520,13 +1567,11 @@ impl App {
                 let Screen::JoinFriend { code, error } = &mut self.screen else {
                     return Task::none();
                 };
-                let parsed = match code.parse::<nethernode_core::share::JoinCode>() {
-                    Ok(parsed) => parsed,
-                    Err(e) => {
-                        *error = Some(e.to_string());
-                        return Task::none();
-                    }
-                };
+                if !nethernode_core::invite::looks_valid(code) {
+                    *error = Some("That isn't a netherNode code: it should be four words, like maple-orbit-tunnel-frog".into());
+                    return Task::none();
+                }
+                let parsed = code.trim().to_string();
                 if self.join_session.is_some() {
                     *error = Some("You're already in a friend's world; leave it first".into());
                     return Task::none();
@@ -1537,7 +1582,10 @@ impl App {
                     stop: Some(stop_tx),
                 });
                 self.screen = Screen::Home;
-                return Task::run(game::join_share(parsed, stop_rx), Message::JoinUpdate);
+                return Task::run(
+                    game::join_share(self.paths.clone(), parsed, stop_rx),
+                    Message::JoinUpdate,
+                );
             }
             Message::JoinUpdate(update) => match update {
                 game::JoinUpdate::Status(status) => {
@@ -1842,11 +1890,15 @@ impl App {
                     instance: name,
                     is_server: true,
                     code: None,
+                    full_code: None,
                     stop: Some(stop_tx),
                     requests: Vec::new(),
                     friends: Vec::new(),
                 });
-                return Task::run(game::host_share(port, stop_rx), Message::Share);
+                return Task::run(
+                    game::host_share(self.paths.clone(), port, stop_rx),
+                    Message::Share,
+                );
             }
             Message::PlayOnServer(name) => {
                 let Some(server) = self.servers.iter().find(|s| s.name == name).cloned() else {
@@ -2138,6 +2190,7 @@ impl App {
                     move_files: true,
                     renderer: self.settings.renderer,
                     animated_background: self.settings.animated_background,
+                    skins: self.settings.skins,
                     busy: false,
                 });
             }
@@ -2189,6 +2242,11 @@ impl App {
                     f.animated_background = on;
                 }
             }
+            Message::SettingsSkins(on) => {
+                if let Screen::Settings(f) = &mut self.screen {
+                    f.skins = on;
+                }
+            }
             Message::SaveSettings => {
                 let busy =
                     !self.runs.is_empty() || !self.jobs.is_empty() || !self.pack_jobs.is_empty();
@@ -2203,6 +2261,7 @@ impl App {
                     servers_dir: f.servers_dir.clone(),
                     renderer: f.renderer,
                     animated_background: f.animated_background,
+                    skins: f.skins,
                 };
                 let old = self.paths.clone();
                 let target = new.paths();
@@ -2367,6 +2426,57 @@ impl App {
                 {
                     self.error(e.to_string());
                 }
+            }
+            Message::PickSkin(name, cape) => {
+                let title = if cape {
+                    "Choose a cape (64×32 PNG)"
+                } else {
+                    "Choose a skin (64×64 PNG)"
+                };
+                return Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title(title)
+                        .add_filter("PNG image", &["png"])
+                        .pick_file(),
+                    move |file| {
+                        Message::SkinPicked(
+                            name.clone(),
+                            cape,
+                            file.map(|f| f.path().to_path_buf()),
+                        )
+                    },
+                );
+            }
+            Message::SkinPicked(name, cape, Some(path)) => {
+                let store = nethernode_core::skins::SkinStore::new(&self.paths);
+                let model = self.skins.get(&name).map(|s| s.model).unwrap_or_default();
+                let result = std::fs::read(&path).map_err(Into::into).and_then(|png| {
+                    if cape {
+                        store.set_own_cape(&name, Some(&png))
+                    } else {
+                        store.set_own_skin(&name, &png, model)
+                    }
+                });
+                match result {
+                    Ok(()) => self.notice = None,
+                    Err(e) => self.error(e.to_string()),
+                }
+                self.skins = load_skins(&self.paths, &self.accounts);
+            }
+            Message::SkinPicked(_, _, None) => {}
+            Message::SetSkinModel(name, model) => {
+                let store = nethernode_core::skins::SkinStore::new(&self.paths);
+                if let Err(e) = store.set_own_model(&name, model) {
+                    self.error(e.to_string());
+                }
+                self.skins = load_skins(&self.paths, &self.accounts);
+            }
+            Message::RemoveSkin(name) => {
+                let store = nethernode_core::skins::SkinStore::new(&self.paths);
+                if let Err(e) = store.remove_own(&name) {
+                    self.error(e.to_string());
+                }
+                self.skins = load_skins(&self.paths, &self.accounts);
             }
 
             Message::ShowMods(name) => {

@@ -29,7 +29,15 @@ An offline-accounts Minecraft launcher for Linux, macOS and Windows, written in 
 
 Invite friends / Join friend tunnel a LAN world over the internet with iroh: QUIC with TLS 1.3, NAT hole punching, and a relay fallback over HTTPS for CGNAT. The join code carries a random secret, the host approves each friend, and the joiner sees the world in Minecraft's LAN list. Verified on this machine: direct about 0 ms, relay-only 162 ms round trip (n0's public relays are in the US/EU).
 
-**Next:** self-hosted relay option (for example a small server in India) to cut relay latency; shorter join codes; show "direct" vs "relay" in the banner.
+Short codes: the host gets four everyday words (for example `maple-orbit-tunnel-frog`) that are easy to read out loud. The full code is published under a key derived from the words on iroh's public lookup service; the friend's app looks it up. Full codes still work.
+
+**Next:** self-hosted relay option (for example a small server in India) to cut relay latency; show "direct" vs "relay" in the banner.
+
+## Skins (done)
+
+Custom skins and capes per account (Accounts screen or `nethernode account skin`). A local skin service plus authlib-injector (open source, downloaded at a pinned version and checked by SHA-256, never bundled) shows them in game, and Invite friends exchanges skins between friends. Nothing logs in anywhere. Verified: the game loads the signed profile, LAN-style logins pass through the local `hasJoined`, and a real client downloaded its custom skin in a world.
+
+**Open question:** friends see each other's skins only if all netherNode installs sign skin data with the same key (Minecraft rejects other players' skins it can't verify). Today each install has its own key, so you see your own skin and, as host, your friends' skins; joiners see default skins for other players.
 
 ## Servers on this PC (done)
 

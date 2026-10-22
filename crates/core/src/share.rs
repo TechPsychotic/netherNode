@@ -11,7 +11,9 @@
 //!   LAN so the world shows up in Minecraft's LAN list, and only accepts connections from
 //!   the same computer.
 //!
-//! Each Minecraft TCP connection (server-list ping, game) is one QUIC stream.
+//! Each Minecraft TCP connection (server-list ping, game) is one QUIC stream. Skins travel
+//! on one more stream: the joiner sends theirs, the host answers with everyone's and passes
+//! on new ones as friends arrive, so everybody sees everybody's skin.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -27,8 +29,16 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 use crate::error::{Result, other};
+use crate::skins::{self, SkinRecord, SkinStore};
 
-pub const ALPN: &[u8] = b"nethernode/minecraft-lan/1";
+pub const ALPN: &[u8] = b"nethernode/minecraft-lan/2";
+/// First byte of every stream after approval: what the stream carries.
+const STREAM_MINECRAFT: u8 = 1;
+const STREAM_SKINS: u8 = 2;
+/// Largest skin message accepted (a handful of skins and capes).
+const MAX_SKIN_FRAME: usize = 4 * 1024 * 1024;
+/// Most skins one friend may announce.
+const MAX_FRIEND_SKINS: usize = 8;
 const SECRET_LEN: usize = 8;
 /// Minecraft's LAN discovery: multicast group and port the game listens on.
 const LAN_GROUP: SocketAddr =
@@ -96,10 +106,125 @@ async fn bind() -> Result<Endpoint> {
         .map_err(|e| other(format!("couldn't start networking: {e}")))
 }
 
+async fn write_frame(send: &mut SendStream, bytes: &[u8]) -> std::io::Result<()> {
+    send.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
+    Ok(send.write_all(bytes).await?)
+}
+
+async fn read_frame(recv: &mut RecvStream) -> Option<Vec<u8>> {
+    let mut len = [0u8; 4];
+    recv.read_exact(&mut len).await.ok()?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > MAX_SKIN_FRAME {
+        return None;
+    }
+    let mut buf = vec![0u8; len];
+    recv.read_exact(&mut buf).await.ok()?;
+    Some(buf)
+}
+
+/// Skins known in one hosting session, and a channel announcing new ones.
+struct SkinHub {
+    store: SkinStore,
+    known: Mutex<std::collections::BTreeMap<String, SkinRecord>>,
+    news: tokio::sync::broadcast::Sender<Arc<Vec<SkinRecord>>>,
+}
+
+impl SkinHub {
+    fn new(store: SkinStore) -> Self {
+        let known = store
+            .own_records()
+            .into_iter()
+            .map(|r| (r.name.clone(), r))
+            .collect();
+        Self {
+            store,
+            known: Mutex::new(known),
+            news: tokio::sync::broadcast::channel(16).0,
+        }
+    }
+
+    /// A friend's skin stream: take theirs, send everyone's, then keep them up to date.
+    async fn serve(&self, mut send: SendStream, mut recv: RecvStream) {
+        let mut news = self.news.subscribe();
+        let theirs: Vec<SkinRecord> = match read_frame(&mut recv).await {
+            Some(frame) => skins::decode(&frame)
+                .into_iter()
+                .take(MAX_FRIEND_SKINS)
+                .collect(),
+            None => return,
+        };
+        // Only well-formed skins that don't clash with the host's own accounts are kept.
+        let theirs: Vec<SkinRecord> = theirs
+            .into_iter()
+            .filter(|r| self.store.store_friend(r).is_ok())
+            .collect();
+        let everyone: Vec<SkinRecord> = {
+            let mut known = self.known.lock().unwrap();
+            for r in &theirs {
+                known.entry(r.name.clone()).or_insert_with(|| r.clone());
+            }
+            known.values().cloned().collect()
+        };
+        if !theirs.is_empty() {
+            let _ = self.news.send(Arc::new(theirs.clone()));
+        }
+        if write_frame(&mut send, &skins::encode(&everyone))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let mine: HashSet<String> = theirs.into_iter().map(|r| r.name).collect();
+        loop {
+            match news.recv().await {
+                Ok(records) => {
+                    let records: Vec<SkinRecord> = records
+                        .iter()
+                        .filter(|r| !mine.contains(&r.name))
+                        .cloned()
+                        .collect();
+                    if !records.is_empty()
+                        && write_frame(&mut send, &skins::encode(&records))
+                            .await
+                            .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+/// Joiner side: send our skins, then store whatever the host sends until the session ends.
+async fn exchange_skins(conn: Connection, store: SkinStore) {
+    let Ok((mut send, mut recv)) = conn.open_bi().await else {
+        return;
+    };
+    let mine = skins::encode(&store.own_records());
+    if send.write_all(&[STREAM_SKINS]).await.is_err()
+        || write_frame(&mut send, &mine).await.is_err()
+    {
+        return;
+    }
+    while let Some(frame) = read_frame(&mut recv).await {
+        for record in skins::decode(&frame) {
+            let _ = store.store_friend(&record);
+        }
+    }
+}
+
 /// Something the host's UI should show.
 pub enum HostEvent {
-    /// Sharing is live; give this code to friends.
-    Ready(JoinCode),
+    /// Sharing is live; give friends the short code (or the full one if it couldn't be
+    /// published).
+    Ready {
+        code: JoinCode,
+        short: Option<crate::invite::ShortCode>,
+    },
     /// Someone with the right code wants in. Answer through `reply` (dropping it = deny).
     Request {
         friend: String,
@@ -114,8 +239,10 @@ pub enum HostEvent {
 }
 
 /// Share `127.0.0.1:lan_port` (the world opened to LAN) until `stop` completes.
+/// With `skins`, players' skins are exchanged too (see [`crate::skins::for_sharing`]).
 pub async fn host(
     lan_port: u16,
+    skins: Option<SkinStore>,
     on_event: impl Fn(HostEvent) + Send + Sync + 'static,
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
@@ -124,22 +251,48 @@ pub async fn host(
     let _ = tokio::time::timeout(Duration::from_secs(20), endpoint.online()).await;
     let mut secret = [0u8; SECRET_LEN];
     getrandom::fill(&mut secret).map_err(|e| other(format!("no secure random numbers: {e}")))?;
-    on_event(HostEvent::Ready(JoinCode {
+    let code = JoinCode {
         host: endpoint.id(),
         secret,
-    }));
+    };
+    let http = crate::download::client();
+    let short = match crate::invite::ShortCode::random() {
+        Ok(short) => match crate::invite::publish(&http, &short, &code).await {
+            Ok(()) => Some(short),
+            Err(e) => {
+                eprintln!("{e}; friends can use the full code");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let republish = {
+        let (short, code) = (short.clone(), code.clone());
+        async move {
+            let Some(short) = short else {
+                return std::future::pending().await;
+            };
+            loop {
+                tokio::time::sleep(crate::invite::REPUBLISH).await;
+                let _ = crate::invite::publish(&http, &short, &code).await;
+            }
+        }
+    };
+    on_event(HostEvent::Ready { code, short });
 
     let on_event = Arc::new(on_event);
     let approved: Arc<Mutex<HashSet<EndpointId>>> = Arc::default();
-    tokio::pin!(stop);
+    let hub = skins.map(|store| Arc::new(SkinHub::new(store)));
+    tokio::pin!(stop, republish);
     loop {
         tokio::select! {
+            () = &mut republish => {}
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
-                let (on_event, approved) = (on_event.clone(), approved.clone());
+                let (on_event, approved, hub) = (on_event.clone(), approved.clone(), hub.clone());
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
-                    serve_friend(conn, secret, lan_port, on_event, approved).await;
+                    serve_friend(conn, secret, lan_port, on_event, approved, hub).await;
                 });
             }
             () = &mut stop => break,
@@ -155,6 +308,7 @@ async fn serve_friend(
     lan_port: u16,
     on_event: Arc<impl Fn(HostEvent) + Send + Sync + 'static>,
     approved: Arc<Mutex<HashSet<EndpointId>>>,
+    hub: Option<Arc<SkinHub>>,
 ) {
     let friend_id = conn.remote_id();
     let friend = friend_id.fmt_short().to_string();
@@ -202,11 +356,26 @@ async fn serve_friend(
         friend: friend.clone(),
     });
 
-    // 3. Every further stream is one Minecraft connection to the LAN world.
-    while let Ok((send, recv)) = conn.accept_bi().await {
+    // 3. Every further stream is a Minecraft connection to the LAN world, or skins.
+    while let Ok((send, mut recv)) = conn.accept_bi().await {
+        let hub = hub.clone();
         tokio::spawn(async move {
-            if let Ok(tcp) = TcpStream::connect((Ipv4Addr::LOCALHOST, lan_port)).await {
-                pipe(tcp, send, recv).await;
+            let mut kind = [0u8; 1];
+            if recv.read_exact(&mut kind).await.is_err() {
+                return;
+            }
+            match kind[0] {
+                STREAM_MINECRAFT => {
+                    if let Ok(tcp) = TcpStream::connect((Ipv4Addr::LOCALHOST, lan_port)).await {
+                        pipe(tcp, send, recv).await;
+                    }
+                }
+                STREAM_SKINS => {
+                    if let Some(hub) = hub {
+                        hub.serve(send, recv).await;
+                    }
+                }
+                _ => {}
             }
         });
     }
@@ -226,9 +395,11 @@ pub enum JoinEvent {
 }
 
 /// Join a friend's world until `stop` completes or the host ends it.
+/// With `skins`, our skins go to the host and everyone's come back.
 pub async fn join(
     code: &JoinCode,
     name: &str,
+    skins: Option<SkinStore>,
     on_event: impl Fn(JoinEvent) + Send + Sync + 'static,
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
@@ -265,6 +436,10 @@ pub async fn join(
 
     // Listen on all interfaces so the LAN-list entry (which uses this computer's LAN address)
     // works, but only accept connections coming from this same computer.
+    let skin_sync = match skins {
+        Some(store) => tokio::spawn(exchange_skins(conn.clone(), store)),
+        None => tokio::spawn(async {}),
+    };
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     let port = listener.local_addr()?.port();
     on_event(JoinEvent::Ready { port });
@@ -281,7 +456,9 @@ pub async fn join(
                 }
                 let conn = conn.clone();
                 tokio::spawn(async move {
-                    if let Ok((send, recv)) = conn.open_bi().await {
+                    if let Ok((mut send, recv)) = conn.open_bi().await
+                        && send.write_all(&[STREAM_MINECRAFT]).await.is_ok()
+                    {
                         pipe(tcp, send, recv).await;
                     }
                 });
@@ -291,6 +468,7 @@ pub async fn join(
             () = &mut stop => break Ok(()),
         }
     };
+    skin_sync.abort();
     conn.close(0u32.into(), b"bye");
     endpoint.close().await;
     result

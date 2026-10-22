@@ -15,7 +15,11 @@ use nethernode_core::version;
 use nethernode_core::{modpack, mods, share};
 
 #[derive(Parser)]
-#[command(name = "nethernode", version, about = "Offline Minecraft launcher")]
+#[command(
+    name = "nethernode",
+    version,
+    about = "just another minecraft launcher"
+)]
 struct Cli {
     /// Data directory (default: $NETHERNODE_HOME or the platform data dir)
     #[arg(long, global = true)]
@@ -56,6 +60,9 @@ enum Command {
     /// Play a LAN world with friends over the internet (no port forwarding)
     #[command(subcommand)]
     Share(ShareCmd),
+    /// Run the local skin service until Ctrl+C (for troubleshooting skins)
+    #[command(hide = true)]
+    SkinService,
     /// Minecraft servers hosted on this PC
     #[command(subcommand)]
     Server(ServerCmd),
@@ -87,6 +94,19 @@ enum AccountCmd {
     Remove { name: String },
     /// Set the default account
     Default { name: String },
+    /// Give an account a custom skin (a 64x64 PNG), seen in game by you and your friends
+    Skin {
+        name: String,
+        png: PathBuf,
+        /// Slim (Alex-style) arms
+        #[arg(long)]
+        slim: bool,
+        /// A cape (64x32 PNG)
+        #[arg(long)]
+        cape: Option<PathBuf>,
+    },
+    /// Go back to the default skin
+    RemoveSkin { name: String },
 }
 
 #[derive(Subcommand)]
@@ -226,7 +246,9 @@ enum ShareCmd {
     },
     /// Join a friend's world with their code
     Join {
-        code: String,
+        /// The four words (or full code) from the host
+        #[arg(required = true, num_args = 1..)]
+        code: Vec<String>,
         /// Name shown in Minecraft's LAN list
         #[arg(long, default_value = "Friend's world (netherNode)")]
         name: String,
@@ -333,6 +355,29 @@ async fn main() -> Result<()> {
                     accounts.set_default(&name)?;
                     accounts.save(&paths)?;
                     println!("default account: {name}");
+                }
+                AccountCmd::Skin {
+                    name,
+                    png,
+                    slim,
+                    cape,
+                } => {
+                    let account = accounts.pick(Some(&name))?;
+                    let store = nethernode_core::skins::SkinStore::new(&paths);
+                    let model = if slim {
+                        nethernode_core::skins::Model::Slim
+                    } else {
+                        nethernode_core::skins::Model::Classic
+                    };
+                    store.set_own_skin(&account.name, &std::fs::read(&png)?, model)?;
+                    if let Some(cape) = cape {
+                        store.set_own_cape(&account.name, Some(&std::fs::read(&cape)?))?;
+                    }
+                    println!("{} now wears {}", account.name, png.display());
+                }
+                AccountCmd::RemoveSkin { name } => {
+                    nethernode_core::skins::SkinStore::new(&paths).remove_own(&name)?;
+                    println!("{name} is back to the default skin");
                 }
             }
         }
@@ -655,10 +700,12 @@ async fn main() -> Result<()> {
                         }
                         let result = share::host(
                             port,
+                            nethernode_core::skins::for_sharing(&paths),
                             |event| match event {
-                                share::HostEvent::Ready(code) => {
-                                    println!("\nfriends can join with this code:\n  {code}\n")
-                                }
+                                share::HostEvent::Ready { code, short } => match short {
+                                    Some(short) => println!("\nfriends can join with this code:\n  {short}\n(or the full code: {code})\n"),
+                                    None => println!("\nfriends can join with this code:\n  {code}\n"),
+                                },
                                 share::HostEvent::Request { friend, reply } => {
                                     println!("{friend} wants to join; letting them in (CLI)");
                                     let _ = reply.send(true);
@@ -690,6 +737,14 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::SkinService => {
+            let (port, run) = nethernode_core::skins::serve(&paths).await?;
+            println!("skin service on http://127.0.0.1:{port}/");
+            tokio::select! {
+                () = run => {}
+                _ = shutdown_signal() => {}
+            }
+        }
         Command::Share(cmd) => match cmd {
             ShareCmd::Host { port, yes } => {
                 let stop = async {
@@ -697,10 +752,12 @@ async fn main() -> Result<()> {
                 };
                 share::host(
                     port,
+                    nethernode_core::skins::for_sharing(&paths),
                     move |event| match event {
-                        share::HostEvent::Ready(code) => {
-                            println!("Sharing localhost:{port}. Give your friend this code:\n\n  {code}\n")
-                        }
+                        share::HostEvent::Ready { code, short } => match short {
+                            Some(short) => println!("Sharing localhost:{port}. Give your friend this code:\n\n  {short}\n\n(or the full code: {code})"),
+                            None => println!("Sharing localhost:{port}. Give your friend this code:\n\n  {code}\n"),
+                        },
                         share::HostEvent::Request { friend, reply } => {
                             let allow = yes || {
                                 println!("{friend} wants to join. Allow? [y/N]");
@@ -717,13 +774,14 @@ async fn main() -> Result<()> {
                 .await?;
             }
             ShareCmd::Join { code, name } => {
-                let code: share::JoinCode = code.parse()?;
+                let code = nethernode_core::invite::resolve(&code.join(" ")).await?;
                 let stop = async {
                     let _ = shutdown_signal().await;
                 };
                 share::join(
                     &code,
                     &name,
+                    nethernode_core::skins::for_sharing(&paths),
                     |event| match event {
                         share::JoinEvent::Connecting => println!("connecting…"),
                         share::JoinEvent::WaitingForApproval => println!("waiting for your friend to allow you in…"),

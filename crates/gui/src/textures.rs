@@ -46,6 +46,33 @@ pub fn icon_name(loader: Option<LoaderKind>) -> &'static str {
     }
 }
 
+/// A skin's face (front of the head plus the hat layer), 8×8, for the Accounts screen.
+pub fn skin_face(png: &[u8]) -> Option<iced::widget::image::Handle> {
+    let img = decode(png)?;
+    let px = |x: u32, y: u32| {
+        let i = ((y * img.width + x) * 4) as usize;
+        [
+            img.rgba[i],
+            img.rgba[i + 1],
+            img.rgba[i + 2],
+            img.rgba[i + 3],
+        ]
+    };
+    let mut face = Vec::with_capacity(8 * 8 * 4);
+    for y in 8..16 {
+        for x in 8..16 {
+            let [r, g, b, _] = px(x, y);
+            let [hr, hg, hb, ha] = px(x + 32, y);
+            let a = u16::from(ha);
+            let mix = |base: u8, top: u8| {
+                ((u16::from(base) * (255 - a) + u16::from(top) * a) / 255) as u8
+            };
+            face.extend_from_slice(&[mix(r, hr), mix(g, hg), mix(b, hb), 255]);
+        }
+    }
+    Some(iced::widget::image::Handle::from_rgba(8, 8, face))
+}
+
 fn decode(bytes: &[u8]) -> Option<Image> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());

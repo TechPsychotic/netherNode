@@ -32,6 +32,8 @@ pub struct Settings {
     pub servers_dir: Option<PathBuf>,
     pub renderer: Renderer,
     pub animated_background: bool,
+    /// Custom skins in game (a local skin service plus authlib-injector).
+    pub skins: bool,
 }
 
 impl Default for Settings {
@@ -42,6 +44,7 @@ impl Default for Settings {
             servers_dir: None,
             renderer: Renderer::Auto,
             animated_background: true,
+            skins: true,
         }
     }
 }
