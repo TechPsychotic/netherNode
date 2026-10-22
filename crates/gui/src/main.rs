@@ -217,18 +217,24 @@ pub struct JoinSession {
     stop: Option<oneshot::Sender<()>>,
 }
 
-/// The LAN port in a game log line: "Started serving on 51234" (server log) or
-/// "Local game hosted on port 51234" (chat message).
+/// The LAN port in a game log line. Versions word it differently: "Published LAN server on
+/// port 51234" (26.x), "Started serving on 51234" (1.13–1.21), "Started on 51234" (older),
+/// and the English chat message "Local game hosted on port [51234]".
 fn lan_port_from(line: &str) -> Option<u16> {
-    ["Started serving on ", "hosted on port "]
-        .iter()
-        .find_map(|marker| {
-            let rest = &line[line.find(marker)? + marker.len()..];
-            rest.split(|c: char| !c.is_ascii_digit())
-                .next()?
-                .parse()
-                .ok()
-        })
+    [
+        "Published LAN server on port ",
+        "Started serving on ",
+        "Started on ",
+        "hosted on port ",
+    ]
+    .iter()
+    .find_map(|marker| {
+        let rest = line[line.find(marker)? + marker.len()..].trim_start_matches(['[', ' ']);
+        rest.split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    })
 }
 
 pub struct Job {
@@ -463,6 +469,8 @@ pub enum Message {
     CloseRequested(window::Id),
     LoaderSupport(String, LoaderKind, Result<bool, String>),
     InviteFriends(String),
+    /// Result of looking for a world opened to LAN on this computer.
+    LanWorldFound(String, Option<u16>),
     Share(game::ShareEvent),
     StopSharing,
     AnswerJoin(usize, bool),
@@ -1474,10 +1482,34 @@ impl App {
                 }
             }
 
+            Message::LanWorldFound(name, port) => {
+                self.notice = None;
+                match (port, self.runs.get_mut(&name)) {
+                    (Some(port), Some(run)) => {
+                        run.lan_port = Some(port);
+                        return self.update(Message::InviteFriends(name));
+                    }
+                    (None, Some(_)) => self.error(
+                        "Couldn't find a world opened to LAN. In the game, load a world, then press Esc → Open to LAN → Start LAN World, and try again",
+                    ),
+                    _ => {}
+                }
+            }
             Message::InviteFriends(name) => {
                 let Some(port) = self.runs.get(&name).and_then(|r| r.lan_port) else {
-                    self.error("Open the world to LAN in the game first (Esc → Open to LAN)");
-                    return Task::none();
+                    if !self.runs.contains_key(&name) {
+                        self.error("Play this instance, load a world, then Esc → Open to LAN");
+                        return Task::none();
+                    }
+                    // Not seen in the log (some versions and languages word it differently):
+                    // listen for the game's own LAN announcement instead.
+                    self.notice = Some((false, "Looking for your LAN world…".into()));
+                    return Task::perform(
+                        nethernode_core::share::find_local_lan_world(
+                            std::time::Duration::from_secs(5),
+                        ),
+                        move |port| Message::LanWorldFound(name.clone(), port),
+                    );
                 };
                 if self.host_share.is_some() {
                     return Task::none();
@@ -2824,6 +2856,18 @@ mod tests {
         assert_eq!(
             lan_port_from("[Render thread/INFO]: [CHAT] Local game hosted on port 40000"),
             Some(40000)
+        );
+        assert_eq!(
+            lan_port_from("[Server thread/INFO]: Published LAN server on port 45678"),
+            Some(45678)
+        );
+        assert_eq!(
+            lan_port_from("[Render thread/INFO]: [CHAT] Local game hosted on port [41234]"),
+            Some(41234)
+        );
+        assert_eq!(
+            lan_port_from("[Server thread/INFO]: Started on 25565"),
+            Some(25565)
         );
         assert_eq!(
             lan_port_from("[Server thread/INFO]: Starting integrated minecraft server"),

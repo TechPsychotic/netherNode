@@ -396,12 +396,14 @@ impl App {
             .align_y(Alignment::Center);
 
         // Always shown, so it's easy to find; it works once the world is open to LAN.
-        let lan_open = self.runs.get(&name).is_some_and(|r| r.lan_port.is_some());
+        // Clickable while the game runs: the world is found in the log or, failing that,
+        // from the game's LAN announcement when clicked.
+        let running = self.runs.get(&name).is_some_and(|r| r.heap.is_some());
         let invite: Option<Element<'_, Message>> = self.host_share.is_none().then(|| {
             button(text("Invite friends").size(14).font(BOLD))
                 .padding([8, 16])
                 .style(theme::play)
-                .on_press_maybe(lan_open.then(|| Message::InviteFriends(name.clone())))
+                .on_press_maybe(running.then(|| Message::InviteFriends(name.clone())))
                 .into()
         });
         // While the game runs, the console area already explains Open to LAN.

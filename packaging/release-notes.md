@@ -1,4 +1,4 @@
-**netherNode 1.1**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
+**netherNode 1.1.1**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
 
 ## Downloads
 
@@ -13,6 +13,11 @@
 - **Windows:** unzip, run `nethernode-gui.exe`. If SmartScreen appears: *More info → Run anyway*.
 - **macOS:** open the `.dmg`, drag netherNode to Applications, then right-click it → *Open* → *Open* (first time only). If macOS says it's damaged: `xattr -dr com.apple.quarantine /Applications/netherNode.app`.
 - **Linux:** extract, then run `./install.sh` (adds it to the app menu) or `./nethernode-gui` directly.
+
+## Fixed in 1.1.1
+
+- *Invite friends* on an instance now works after **Open to LAN** in every Minecraft version and game language. netherNode finds the world from the game's own LAN announcement when the log doesn't say which port it uses.
+- The download now includes the license (GPL-3.0).
 
 ## New in 1.1
 

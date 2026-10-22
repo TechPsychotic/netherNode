@@ -489,9 +489,97 @@ async fn announce_on_lan(name: &str, port: u16) {
     }
 }
 
+/// Find a world this computer has opened to LAN, by listening for Minecraft's own LAN
+/// announcements (the same ones the Multiplayer screen uses). Works for every version and
+/// game language, unlike reading the port from the game log. `None` if nothing is announced
+/// within `wait`.
+pub async fn find_local_lan_world(wait: Duration) -> Option<u16> {
+    let socket = lan_listener().ok()?;
+    let mut buf = [0u8; 1024];
+    let search = async {
+        loop {
+            let Ok((n, _)) = socket.recv_from(&mut buf).await else {
+                continue;
+            };
+            let packet = String::from_utf8_lossy(&buf[..n]);
+            // Skip worlds netherNode itself announces for friends' worlds.
+            if packet.contains("(netherNode)") {
+                continue;
+            }
+            let Some(port) = lan_ad_port(&packet) else {
+                continue;
+            };
+            // Only a world on this computer: it must accept connections on localhost.
+            let local = tokio::time::timeout(
+                Duration::from_secs(1),
+                TcpStream::connect((Ipv4Addr::LOCALHOST, port)),
+            )
+            .await;
+            if matches!(local, Ok(Ok(_))) {
+                return port;
+            }
+        }
+    };
+    tokio::time::timeout(wait, search).await.ok()
+}
+
+/// The port in a LAN announcement: `[MOTD]name[/MOTD][AD]port[/AD]`.
+fn lan_ad_port(packet: &str) -> Option<u16> {
+    let start = packet.find("[AD]")? + 4;
+    let end = start + packet[start..].find("[/AD]")?;
+    // Some versions announce "host:port".
+    packet[start..end].rsplit(':').next()?.trim().parse().ok()
+}
+
+/// A UDP socket in Minecraft's LAN group, sharing the port with any game listening too.
+fn lan_listener() -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+    socket.bind(&SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), LAN_GROUP.port()).into())?;
+    socket.join_multicast_v4(&Ipv4Addr::new(224, 0, 2, 60), &Ipv4Addr::UNSPECIFIED)?;
+    socket.set_multicast_loop_v4(true)?;
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_lan_announcements() {
+        assert_eq!(
+            lan_ad_port("[MOTD]Steve - World[/MOTD][AD]51234[/AD]"),
+            Some(51234)
+        );
+        assert_eq!(
+            lan_ad_port("[MOTD]x[/MOTD][AD]192.168.1.5:40000[/AD]"),
+            Some(40000)
+        );
+        assert_eq!(lan_ad_port("[MOTD]x[/MOTD]"), None);
+    }
+
+    /// Announces a fake world the way Minecraft does and finds it.
+    #[tokio::test]
+    async fn finds_a_world_opened_to_lan() {
+        let world = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = world.local_addr().unwrap().port();
+        let announce = tokio::spawn(async move {
+            let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+            let _ = socket.set_multicast_loop_v4(true);
+            loop {
+                let packet = format!("[MOTD]Steve - Test[/MOTD][AD]{port}[/AD]");
+                let _ = socket.send_to(packet.as_bytes(), LAN_GROUP).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        });
+        let found = find_local_lan_world(Duration::from_secs(5)).await;
+        announce.abort();
+        assert_eq!(found, Some(port));
+    }
 
     #[test]
     fn join_codes_round_trip_and_reject_garbage() {
