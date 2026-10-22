@@ -194,21 +194,11 @@ impl App {
                 .height(size)
                 .filter_method(FilterMethod::Nearest)
                 .into(),
-            None => {
-                let initial = instance
-                    .name
-                    .chars()
-                    .next()
-                    .unwrap_or('?')
-                    .to_uppercase()
-                    .to_string();
-                container(text(initial).size(size * 0.45).font(BOLD))
-                    .center(size)
-                    .style(theme::chip(loader_color(
-                        instance.loader.as_ref().map(|l| l.kind),
-                    )))
-                    .into()
-            }
+            None => image(crate::textures::fallback_icon(name))
+                .width(size)
+                .height(size)
+                .filter_method(FilterMethod::Nearest)
+                .into(),
         }
     }
 

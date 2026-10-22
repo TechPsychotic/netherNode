@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nethernode_core::loader::LoaderKind;
 use nethernode_core::paths::Paths;
@@ -25,14 +25,15 @@ pub struct GameTextures {
     pub icons: HashMap<&'static str, iced::widget::image::Handle>,
 }
 
-/// Block textures used as instance icons, per loader. (name, path after `textures/`)
-const ICONS: &[(&str, &str)] = &[
-    ("vanilla", "block/grass_block_side"),
-    ("fabric", "block/crafting_table_front"),
-    ("quilt", "block/loom_front"),
-    ("forge", "block/furnace_front_on"),
-    ("neoforge", "block/smithing_table_front"),
-    ("optifine", "block/glass"),
+/// Block textures used as instance icons, per loader: (name, paths after `textures/`, the
+/// first one found wins). Old versions name some blocks differently or don't have them.
+const ICONS: &[(&str, &[&str])] = &[
+    ("vanilla", &["block/grass_block_side", "blocks/grass_side"]),
+    ("fabric", &["block/crafting_table_front"]),
+    ("quilt", &["block/loom_front"]),
+    ("forge", &["block/furnace_front_on"]),
+    ("neoforge", &["block/smithing_table_front"]),
+    ("optifine", &["block/glass"]),
 ];
 
 pub fn icon_name(loader: Option<LoaderKind>) -> &'static str {
@@ -106,9 +107,12 @@ fn decode(bytes: &[u8]) -> Option<Image> {
 
 /// A vanilla game jar on disk, newest first. Loader versions are skipped: their jar is a
 /// link to the vanilla one anyway.
-fn find_game_jar(paths: &Paths) -> Option<PathBuf> {
-    let mut jars: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(paths.versions())
-        .ok()?
+/// Downloaded game jars, newest first.
+fn game_jars(paths: &Paths) -> Vec<PathBuf> {
+    let Ok(dirs) = std::fs::read_dir(paths.versions()) else {
+        return Vec::new();
+    };
+    let mut jars: Vec<(std::time::SystemTime, PathBuf)> = dirs
         .flatten()
         .filter_map(|dir| {
             let id = dir.file_name().to_str()?.to_string();
@@ -118,7 +122,7 @@ fn find_game_jar(paths: &Paths) -> Option<PathBuf> {
         })
         .collect();
     jars.sort_by_key(|a| std::cmp::Reverse(a.0));
-    jars.into_iter().map(|(_, jar)| jar).next()
+    jars.into_iter().map(|(_, jar)| jar).collect()
 }
 
 fn read(zip: &mut zip::ZipArchive<std::fs::File>, path: &str) -> Option<Image> {
@@ -140,28 +144,164 @@ fn read(zip: &mut zip::ZipArchive<std::fs::File>, path: &str) -> Option<Image> {
     None
 }
 
-/// Load the textures from the newest downloaded game jar, if there is one.
+/// Load the textures from downloaded game jars, newest first. A texture missing from one
+/// jar (an old version may not have a loom, say) is taken from the next.
 pub fn load(paths: &Paths) -> Option<GameTextures> {
-    load_from(&find_game_jar(paths)?)
-}
-
-fn load_from(jar: &Path) -> Option<GameTextures> {
-    let mut zip = zip::ZipArchive::new(std::fs::File::open(jar).ok()?).ok()?;
-    let mut textures = GameTextures {
-        obsidian: read(&mut zip, "block/obsidian"),
-        portal: read(&mut zip, "block/nether_portal").or_else(|| read(&mut zip, "block/portal")),
-        icons: HashMap::new(),
-    };
-    for (name, path) in ICONS {
-        if let Some(img) = read(&mut zip, path) {
-            // Animated textures are strips; the icon is the first square frame.
-            let side = img.width.min(img.height);
-            let rgba = img.rgba[..(side * side * 4) as usize].to_vec();
-            textures.icons.insert(
-                name,
-                iced::widget::image::Handle::from_rgba(side, side, rgba),
-            );
+    let mut textures = GameTextures::default();
+    for jar in game_jars(paths) {
+        let Some(mut zip) = std::fs::File::open(&jar)
+            .ok()
+            .and_then(|f| zip::ZipArchive::new(f).ok())
+        else {
+            continue;
+        };
+        if textures.obsidian.is_none() {
+            textures.obsidian = read(&mut zip, "block/obsidian");
+        }
+        if textures.portal.is_none() {
+            textures.portal =
+                read(&mut zip, "block/nether_portal").or_else(|| read(&mut zip, "block/portal"));
+        }
+        for (name, candidates) in ICONS {
+            if textures.icons.contains_key(name) {
+                continue;
+            }
+            if let Some(img) = candidates.iter().find_map(|path| read(&mut zip, path)) {
+                // Animated textures are strips; the icon is the first square frame.
+                let side = img.width.min(img.height);
+                let rgba = img.rgba[..(side * side * 4) as usize].to_vec();
+                textures.icons.insert(
+                    name,
+                    iced::widget::image::Handle::from_rgba(side, side, rgba),
+                );
+            }
+        }
+        if textures.obsidian.is_some()
+            && textures.portal.is_some()
+            && textures.icons.len() == ICONS.len()
+        {
+            break;
         }
     }
-    (textures.obsidian.is_some() || textures.portal.is_some()).then_some(textures)
+    (textures.obsidian.is_some() || textures.portal.is_some() || !textures.icons.is_empty())
+        .then_some(textures)
+}
+
+/// netherNode's own 16×16 pixel-art icon for a loader, used until the game's textures are
+/// available (nothing here comes from Minecraft).
+pub fn fallback_icon(name: &str) -> iced::widget::image::Handle {
+    static ICONS: std::sync::LazyLock<HashMap<&'static str, iced::widget::image::Handle>> =
+        std::sync::LazyLock::new(|| {
+            [
+                "vanilla", "fabric", "quilt", "forge", "neoforge", "optifine",
+            ]
+            .into_iter()
+            .map(|name| {
+                (
+                    name,
+                    iced::widget::image::Handle::from_rgba(16, 16, draw_icon(name)),
+                )
+            })
+            .collect()
+        });
+    ICONS
+        .get(name)
+        .or_else(|| ICONS.get("vanilla"))
+        .cloned()
+        .expect("vanilla icon")
+}
+
+/// Cheap deterministic per-pixel noise in 0..=255.
+fn noise(x: u32, y: u32, seed: u32) -> u32 {
+    let mut h = x.wrapping_mul(374_761_393)
+        ^ y.wrapping_mul(668_265_263)
+        ^ seed.wrapping_mul(2_246_822_519);
+    h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+    (h ^ (h >> 16)) & 0xff
+}
+
+fn shade([r, g, b]: [u8; 3], amount: i32) -> [u8; 4] {
+    let f = |c: u8| (i32::from(c) + amount).clamp(0, 255) as u8;
+    [f(r), f(g), f(b), 255]
+}
+
+fn draw_icon(name: &str) -> Vec<u8> {
+    let mut px = Vec::with_capacity(16 * 16 * 4);
+    for y in 0..16u32 {
+        for x in 0..16u32 {
+            let n = noise(x, y, name.len() as u32) as i32 / 12 - 10;
+            let edge = x == 0 || y == 0 || x == 15 || y == 15;
+            let c = match name {
+                // Grass over dirt, with a ragged edge.
+                "vanilla" => {
+                    if y < 3 || (y == 3 && noise(x, 0, 7).is_multiple_of(2)) {
+                        shade([92, 160, 60], n)
+                    } else if noise(x, y, 3).is_multiple_of(9) {
+                        shade([120, 120, 120], n)
+                    } else {
+                        shade([134, 96, 67], n)
+                    }
+                }
+                // A workbench: planks with a dark grid of tools.
+                "fabric" => {
+                    if edge {
+                        shade([92, 62, 36], n)
+                    } else if y < 4 {
+                        shade([170, 120, 70], n + if x % 4 == 0 { -30 } else { 0 })
+                    } else if (x == 5 || x == 10) && y > 5 {
+                        shade([70, 70, 75], n)
+                    } else {
+                        shade([150, 104, 60], n + if y % 4 == 0 { -25 } else { 0 })
+                    }
+                }
+                // A patchwork quilt.
+                "quilt" => {
+                    let patch = (x / 4 + y / 4) % 3;
+                    let base = [[150, 90, 200], [230, 200, 120], [90, 150, 220]][patch as usize];
+                    if x % 4 == 0 || y % 4 == 0 {
+                        shade([235, 230, 220], n / 2)
+                    } else {
+                        shade(base, n)
+                    }
+                }
+                // A stone furnace with fire inside.
+                "forge" => {
+                    if (4..12).contains(&x) && (8..14).contains(&y) {
+                        let hot = 13 - y + noise(x, y, 11) % 3;
+                        if hot > 3 {
+                            shade([250, 200, 60], n)
+                        } else {
+                            shade([230, 90, 30], n)
+                        }
+                    } else if (3..13).contains(&x) && (7..15).contains(&y) {
+                        shade([40, 36, 36], n)
+                    } else {
+                        shade([125, 125, 125], n + if y % 5 == 0 { -25 } else { 0 })
+                    }
+                }
+                // An anvil-topped table in warm orange.
+                "neoforge" => {
+                    if y < 4 && (2..14).contains(&x) {
+                        shade([60, 62, 70], n)
+                    } else if edge {
+                        shade([110, 60, 30], n)
+                    } else {
+                        shade([214, 120, 50], n + if (x + y) % 5 == 0 { -30 } else { 0 })
+                    }
+                }
+                // A glass pane with a highlight.
+                _ => {
+                    if edge {
+                        shade([190, 225, 240], n / 2)
+                    } else if x + 2 == y || x + 3 == y {
+                        shade([245, 252, 255], 0)
+                    } else {
+                        [150, 200, 230, 70]
+                    }
+                }
+            };
+            px.extend_from_slice(&c);
+        }
+    }
+    px
 }

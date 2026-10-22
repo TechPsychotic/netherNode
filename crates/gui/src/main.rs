@@ -1108,6 +1108,9 @@ impl App {
                             run.stage = None;
                             run.heap = Some(heap);
                         }
+                        // The game jar is downloaded by now: show its textures right away,
+                        // not only after the game is closed.
+                        return load_textures(self.paths.clone());
                     }
                     game::Event::Log(line) => {
                         if let Some(port) = lan_port_from(&line)
@@ -1142,10 +1145,8 @@ impl App {
                         if self.closing && self.runs.is_empty() {
                             return iced::exit();
                         }
-                        // The first launch may have downloaded the textures we were missing.
-                        if self.textures.is_none() {
-                            return load_textures(self.paths.clone());
-                        }
+                        // This run may have downloaded a version with textures we lacked.
+                        return load_textures(self.paths.clone());
                     }
                 }
             }
@@ -1170,9 +1171,7 @@ impl App {
                         Ok(msg) => self.notice = Some((false, format!("{name}: {msg}"))),
                         Err(e) => self.error(format!("{name}: {e}")),
                     }
-                    if self.textures.is_none() {
-                        return load_textures(self.paths.clone());
-                    }
+                    return load_textures(self.paths.clone());
                 }
             },
 
@@ -2754,9 +2753,7 @@ impl App {
                         }
                         Err(e) => self.error(format!("Couldn't install {label}: {e}")),
                     }
-                    if self.textures.is_none() {
-                        return load_textures(self.paths.clone());
-                    }
+                    return load_textures(self.paths.clone());
                 }
             },
 
