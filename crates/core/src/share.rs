@@ -42,6 +42,8 @@ const STREAM_SKINS: u8 = 2;
 const STREAM_TCP_PORT: u8 = 3;
 /// Followed by a mod's SHA-1 (40 hex characters): send that mod jar.
 const STREAM_MOD_FILE: u8 = 4;
+/// UDP packets too big for one QUIC datagram, both ways (see [`UdpLane`]).
+const STREAM_UDP_LANE: u8 = 5;
 /// Largest skin message accepted (a handful of skins and capes).
 const MAX_SKIN_FRAME: usize = 4 * 1024 * 1024;
 /// Most skins one friend may announce.
@@ -448,10 +450,12 @@ impl Session {
             }
         };
 
-        // 4. Every stream is a Minecraft connection, an extra TCP port, skins or a mod file.
+        // 4. Every stream is a Minecraft connection, an extra TCP port, skins, a mod file or
+        // the lane for big UDP packets.
         let streams = async {
             while let Ok((send, mut recv)) = conn.accept_bi().await {
                 let session = self.clone();
+                let (udp, conn) = (udp.clone(), conn.clone());
                 tokio::spawn(async move {
                     let mut kind = [0u8; 1];
                     if recv.read_exact(&mut kind).await.is_err() {
@@ -483,6 +487,14 @@ impl Session {
                             }
                         }
                         STREAM_MOD_FILE => session.send_mod(send, recv).await,
+                        STREAM_UDP_LANE => {
+                            udp.lane.set(send).await;
+                            while let Some((port, payload)) = read_lane_frame(&mut recv).await {
+                                if session.allowed_port(true, port) {
+                                    udp.host_send(&conn, port, &payload).await;
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 });
@@ -523,6 +535,24 @@ impl Session {
     }
 }
 
+/// Where the host's mod ports are reached: this computer. Diagnostics can point it at
+/// another loopback address (`NETHERNODE_SHARE_HOST_TARGET=127.0.0.2`) to test host and
+/// joiner on one machine without their ports colliding.
+fn host_target() -> Ipv4Addr {
+    std::env::var("NETHERNODE_SHARE_HOST_TARGET")
+        .ok()
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(Ipv4Addr::LOCALHOST)
+}
+
+/// Where the joiner opens extra ports: every interface, so LAN-list joins (which use this
+/// computer's LAN address) work. Diagnostics: `NETHERNODE_SHARE_JOIN_BIND=::1` (or an IPv4 address).
+fn joiner_bind() -> Option<std::net::IpAddr> {
+    std::env::var("NETHERNODE_SHARE_JOIN_BIND")
+        .ok()
+        .and_then(|a| a.parse().ok())
+}
+
 /// A datagram is `[port: u16 big-endian][payload]`, `port` being the host's UDP port.
 fn split_datagram(datagram: &[u8]) -> Option<(u16, &[u8])> {
     let (port, payload) = datagram.split_at_checked(2)?;
@@ -541,6 +571,53 @@ fn make_datagram(port: u16, payload: &[u8]) -> bytes::Bytes {
 #[derive(Clone, Default)]
 struct UdpRelay {
     sockets: Arc<tokio::sync::Mutex<std::collections::HashMap<u16, Arc<UdpSocket>>>>,
+    lane: UdpLane,
+}
+
+/// UDP packets go as QUIC datagrams, which are limited to about 1,200 bytes (less through a
+/// relay). Bigger ones (Simple Voice Chat allows 1,275) would be dropped, so they travel on
+/// this reliable stream instead, as frames of `[port: u16][length: u16][payload]`.
+#[derive(Clone, Default)]
+struct UdpLane(Arc<tokio::sync::Mutex<Option<SendStream>>>);
+
+impl UdpLane {
+    async fn set(&self, send: SendStream) {
+        *self.0.lock().await = Some(send);
+    }
+
+    /// Send one UDP packet to the other side, as a datagram when it fits.
+    async fn send(&self, conn: &Connection, port: u16, payload: &[u8]) {
+        let datagram = make_datagram(port, payload);
+        let fits = conn
+            .max_datagram_size()
+            .is_some_and(|max| datagram.len() <= max);
+        if fits && conn.send_datagram(datagram).is_ok() {
+            return;
+        }
+        let Ok(len) = u16::try_from(payload.len()) else {
+            return;
+        };
+        let mut frame = Vec::with_capacity(payload.len() + 4);
+        frame.extend_from_slice(&port.to_be_bytes());
+        frame.extend_from_slice(&len.to_be_bytes());
+        frame.extend_from_slice(payload);
+        let mut lane = self.0.lock().await;
+        if let Some(send) = lane.as_mut()
+            && send.write_all(&frame).await.is_err()
+        {
+            *lane = None;
+        }
+    }
+}
+
+/// Read one `[port][length][payload]` frame from a UDP lane.
+async fn read_lane_frame(recv: &mut RecvStream) -> Option<(u16, Vec<u8>)> {
+    let mut header = [0u8; 4];
+    recv.read_exact(&mut header).await.ok()?;
+    let port = u16::from_be_bytes([header[0], header[1]]);
+    let mut payload = vec![0u8; usize::from(u16::from_be_bytes([header[2], header[3]]))];
+    recv.read_exact(&mut payload).await.ok()?;
+    Some((port, payload))
 }
 
 impl UdpRelay {
@@ -550,24 +627,23 @@ impl UdpRelay {
             match sockets.get(&port) {
                 Some(s) => s.clone(),
                 None => {
-                    let Ok(socket) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await else {
+                    let Ok(socket) = UdpSocket::bind((host_target(), 0)).await else {
                         return;
                     };
-                    if socket.connect((Ipv4Addr::LOCALHOST, port)).await.is_err() {
+                    if socket.connect((host_target(), port)).await.is_err() {
                         return;
                     }
                     let socket = Arc::new(socket);
                     sockets.insert(port, socket.clone());
                     // Replies from the mod go back to this friend.
-                    let (reply, conn) = (socket.clone(), conn.clone());
+                    let (reply, conn, lane) = (socket.clone(), conn.clone(), self.lane.clone());
                     tokio::spawn(async move {
                         let mut buf = vec![0u8; 65_536];
                         while let Ok(n) = reply.recv(&mut buf).await {
-                            if conn.send_datagram(make_datagram(port, &buf[..n])).is_err()
-                                && conn.close_reason().is_some()
-                            {
+                            if conn.close_reason().is_some() {
                                 break;
                             }
+                            lane.send(&conn, port, &buf[..n]).await;
                         }
                     });
                     socket
@@ -688,26 +764,34 @@ pub async fn join(
     };
     // Listen on all interfaces so the LAN-list entry (which uses this computer's LAN address)
     // works, but only accept connections coming from this same computer.
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+    let listener = listen_tcp(0)?;
     let port = listener.local_addr()?.port();
 
     // UDP on the game port's number (as the host has it) plus extra ports.
     let mut blocked = Vec::new();
     let mut udp: std::collections::HashMap<u16, Arc<JoinerUdp>> = Default::default();
-    if let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await {
+    if let Ok(socket) = listen_udp(port) {
         udp.insert(welcome.game_port, Arc::new(JoinerUdp::new(socket)));
     }
     let mut tcp_extra = Vec::new();
     for extra in &welcome.extra_ports {
         if extra.udp {
-            match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, extra.port)).await {
+            let socket = match joiner_bind() {
+                Some(ip) => UdpSocket::bind((ip, extra.port)).await,
+                None => listen_udp(extra.port),
+            };
+            match socket {
                 Ok(socket) => {
                     udp.insert(extra.port, Arc::new(JoinerUdp::new(socket)));
                 }
                 Err(_) => blocked.push(*extra),
             }
         } else {
-            match TcpListener::bind((Ipv4Addr::UNSPECIFIED, extra.port)).await {
+            let listener = match joiner_bind() {
+                Some(ip) => TcpListener::bind((ip, extra.port)).await,
+                None => listen_tcp(extra.port),
+            };
+            match listener {
                 Ok(listener) => tcp_extra.push((extra.port, listener)),
                 Err(_) => blocked.push(*extra),
             }
@@ -724,10 +808,27 @@ pub async fn join(
     }
 
     let mut tasks = Vec::new();
-    for (host_port, joiner) in udp.iter() {
-        let (joiner, conn, host_port) = (joiner.clone(), conn.clone(), *host_port);
+    // The lane for UDP packets too big for a datagram, both ways.
+    let lane = UdpLane::default();
+    if !udp.is_empty()
+        && let Ok((mut send, mut recv)) = conn.open_bi().await
+        && send.write_all(&[STREAM_UDP_LANE]).await.is_ok()
+    {
+        lane.set(send).await;
+        let udp = udp.clone();
         tasks.push(tokio::spawn(async move {
-            joiner.uplink(&conn, host_port).await
+            while let Some((port, payload)) = read_lane_frame(&mut recv).await {
+                if let Some(joiner) = udp.get(&port) {
+                    joiner.downlink(&payload).await;
+                }
+            }
+        }));
+    }
+    for (host_port, joiner) in udp.iter() {
+        let (joiner, conn, lane, host_port) =
+            (joiner.clone(), conn.clone(), lane.clone(), *host_port);
+        tasks.push(tokio::spawn(async move {
+            joiner.uplink(&conn, &lane, host_port).await
         }));
     }
     {
@@ -804,8 +905,41 @@ pub async fn join(
 }
 
 fn is_this_computer(tcp: &TcpStream, peer: SocketAddr) -> bool {
-    let local = tcp.local_addr().map(|a| a.ip()).ok();
-    peer.ip().is_loopback() || Some(peer.ip()) == local
+    let local = tcp.local_addr().map(|a| a.ip().to_canonical()).ok();
+    let peer = peer.ip().to_canonical();
+    peer.is_loopback() || Some(peer) == local
+}
+
+/// A TCP listener on every interface, IPv6 and IPv4 alike: `localhost` is `::1` on many
+/// systems (Windows, Fedora), and Minecraft tries that first.
+fn listen_tcp(port: u16) -> std::io::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let dual = || -> std::io::Result<std::net::TcpListener> {
+        let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+        socket.set_only_v6(false)?;
+        socket.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
+        socket.listen(128)?;
+        Ok(socket.into())
+    };
+    // Without IPv6 on this computer, IPv4 alone.
+    let listener =
+        dual().or_else(|_| std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)))?;
+    listener.set_nonblocking(true)?;
+    TcpListener::from_std(listener)
+}
+
+/// A UDP socket on every interface, IPv6 and IPv4 alike (see [`listen_tcp`]).
+fn listen_udp(port: u16) -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let dual = || -> std::io::Result<std::net::UdpSocket> {
+        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+        socket.set_only_v6(false)?;
+        socket.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
+        Ok(socket.into())
+    };
+    let socket = dual().or_else(|_| std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)))?;
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket)
 }
 
 /// Joiner side of one forwarded UDP port: packets from the game (or a mod) on this computer
@@ -823,14 +957,15 @@ impl JoinerUdp {
         }
     }
 
-    async fn uplink(&self, conn: &Connection, host_port: u16) {
+    async fn uplink(&self, conn: &Connection, lane: &UdpLane, host_port: u16) {
         let mut buf = vec![0u8; 65_536];
         while let Ok((n, from)) = self.socket.recv_from(&mut buf).await {
-            if !from.ip().is_loopback() && !is_local_ip(from.ip()) {
+            let ip = from.ip().to_canonical();
+            if !ip.is_loopback() && !is_local_ip(ip) {
                 continue;
             }
             *self.peer.lock().await = Some(from);
-            let _ = conn.send_datagram(make_datagram(host_port, &buf[..n]));
+            lane.send(conn, host_port, &buf[..n]).await;
         }
     }
 
@@ -843,7 +978,7 @@ impl JoinerUdp {
 
 /// Whether `ip` belongs to this computer (a UDP sender has no "local address" to compare).
 fn is_local_ip(ip: std::net::IpAddr) -> bool {
-    std::net::UdpSocket::bind((ip, 0)).is_ok()
+    std::net::UdpSocket::bind((ip.to_canonical(), 0)).is_ok()
 }
 
 /// Ports that mods in this game or server folder listen on besides Minecraft's, read from
