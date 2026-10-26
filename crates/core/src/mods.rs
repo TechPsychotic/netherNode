@@ -403,6 +403,52 @@ pub async fn install_preset(
     Ok((installed, skipped))
 }
 
+/// The file to install for `project` (slug or id) on these loaders and Minecraft version:
+/// newest release or beta, like [`install`]. `None` if there's no such version.
+pub(crate) async fn best_file(
+    http: &reqwest::Client,
+    project: &str,
+    loaders: &[&str],
+    mc: &str,
+) -> Result<Option<(String, Download)>> {
+    let info: Project = download::get_json(http, &format!("{MODRINTH}/project/{project}")).await?;
+    let versions: Vec<Version> = http
+        .get(format!("{MODRINTH}/project/{}/version", info.id))
+        .query(&[
+            ("loaders", serde_json::to_string(loaders)?),
+            ("game_versions", serde_json::to_string(&[mc])?),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let pick = versions
+        .iter()
+        .position(|v| v.version_type != "alpha")
+        .unwrap_or(0);
+    let Some(version) = versions.into_iter().nth(pick) else {
+        return Ok(None);
+    };
+    let Some(file) = version
+        .files
+        .iter()
+        .find(|f| f.primary)
+        .or(version.files.first())
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        info.title,
+        Download {
+            url: file.url.clone(),
+            dest: PathBuf::from(&file.filename),
+            sha1: file.hashes.get("sha1").cloned(),
+            size: file.size,
+        },
+    )))
+}
+
 /// A mod file Modrinth knows, found by its SHA-1.
 #[derive(Debug, Clone)]
 pub(crate) struct KnownFile {

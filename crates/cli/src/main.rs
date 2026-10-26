@@ -833,14 +833,35 @@ async fn main() -> Result<()> {
                         }
                         std::future::pending::<()>().await
                     };
-                    let run = server::run(&cmd, |line| println!("{line}"), rx, async {
-                        let _ = shutdown_signal().await;
-                    });
+                    let output = Arc::new(Mutex::new(Vec::new()));
+                    let collected = output.clone();
+                    let run = server::run(
+                        &cmd,
+                        move |line| {
+                            println!("{line}");
+                            let mut lines = collected.lock().unwrap();
+                            if lines.len() > 400 {
+                                lines.remove(0);
+                            }
+                            lines.push(line);
+                        },
+                        rx,
+                        async {
+                            let _ = shutdown_signal().await;
+                        },
+                    );
                     let status = tokio::select! {
                         status = run => status?,
                         () = sharing => unreachable!(),
                     };
                     println!("server stopped ({status})");
+                    let lines = output.lock().unwrap().clone();
+                    let never_ready = !lines.iter().any(|l| l.contains("Done ("));
+                    if (never_ready || !status.success())
+                        && let Some(why) = server::diagnose(&srv.dir(&paths), &lines)
+                    {
+                        println!("{why}");
+                    }
                 }
             }
         }

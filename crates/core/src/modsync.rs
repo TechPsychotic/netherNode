@@ -271,7 +271,10 @@ pub async fn copy_to_server(
         let modrinth_says_client = known
             .get(&hash)
             .is_some_and(|k| client_only.contains(&k.project_id));
-        if modrinth_says_client || fabric_client_only(&jar) {
+        if modrinth_says_client
+            || fabric_client_only(&jar)
+            || crate::moddeps::forge_client_only(&jar)
+        {
             skipped.push(name);
             continue;
         }

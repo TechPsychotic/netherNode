@@ -697,6 +697,95 @@ pub fn import_world(paths: &Paths, server: &Server, source: &Path) -> Result<()>
     Ok(())
 }
 
+/// Why a server stopped right after starting, from its output and newest crash report, in
+/// plain words. A mod that only works in the game (Forge's "invalid dist DEDICATED_SERVER")
+/// is moved to `mods-client-only/` so the next start works.
+pub fn diagnose(dir: &Path, output: &[String]) -> Option<String> {
+    let mut text = output.join("\n");
+    // The newest crash report, if one was written in the last few minutes.
+    let report = std::fs::read_dir(dir.join("crash-reports"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .filter(|(at, _)| at.elapsed().is_ok_and(|age| age.as_secs() < 600))
+        .max_by_key(|(at, _)| *at);
+    if let Some((_, path)) = report
+        && let Ok(report) = std::fs::read_to_string(path)
+    {
+        text.push('\n');
+        text.push_str(&report);
+    }
+    if text.contains("for invalid dist DEDICATED_SERVER")
+        || text.contains("invalid dist DEDICATED_SERVER")
+    {
+        // The mod whose code ran into client-only classes: the first non-loader mod id in a
+        // stack frame like "at TRANSFORMER/cgm@1.3.7/…".
+        const LOADER: &[&str] = &["minecraft", "forge", "neoforge", "fml", "javafml", "mixin"];
+        // Forge says which mod it was creating ("Failed to create mod instance. ModID: x");
+        // otherwise the first non-loader mod in a stack frame ("at TRANSFORMER/x@1.0/…").
+        let named = text.lines().find_map(|l| {
+            let rest = l.split("ModID: ").nth(1)?;
+            let id = rest.split([',', ' ']).next()?.trim();
+            (!id.is_empty()).then(|| id.to_string())
+        });
+        let culprit = named.or_else(|| {
+            text.lines().find_map(|l| {
+                let rest = l.split("TRANSFORMER/").nth(1)?;
+                let id = rest.split('@').next()?;
+                (!LOADER.contains(&id)).then(|| id.to_string())
+            })
+        });
+        let mods = dir.join("mods");
+        if let Some(id) = culprit
+            && let Some(jar) = crate::moddeps::jar_for(&mods, &id)
+        {
+            let aside = dir.join("mods-client-only");
+            let name = jar.file_name().unwrap_or_default().to_owned();
+            if std::fs::create_dir_all(&aside).is_ok()
+                && std::fs::rename(&jar, aside.join(&name)).is_ok()
+            {
+                return Some(format!(
+                    "{} only works in the game, not on a server, so netherNode moved it to the server's mods-client-only folder. Start the server again (players still need it in their game).",
+                    name.to_string_lossy()
+                ));
+            }
+        }
+        return Some(
+            "A mod that only works in the game (not on a server) is in the server's mods folder. Open Folder → mods and remove client-side mods (shaders, minimaps, HUD or graphics mods), then start again.".into(),
+        );
+    }
+    if text.contains("Missing or unsupported mandatory dependencies")
+        || text.contains("which is missing!")
+    {
+        return Some(
+            "A server mod needs another mod that netherNode couldn't find on Modrinth for this version. The console names it; get it from the mod's own page and put it in the server's mods folder.".into(),
+        );
+    }
+    if text.contains("Failed to bind to port") || text.contains("Address already in use") {
+        return Some(
+            "The server's port is used by another program (maybe another server). Stop that one, or change the port in server.properties (Settings → Advanced).".into(),
+        );
+    }
+    if text.contains("OutOfMemoryError") {
+        return Some(
+            "The server ran out of memory. Raise the memory limit in its settings (big modpacks need 4096 MB or more).".into(),
+        );
+    }
+    if text.contains("Mixin apply failed")
+        || text.contains("MixinApplyError")
+        || text.contains("InvalidMixinException")
+    {
+        return Some(
+            "A mod failed to load on the server (a mixin error). It may only work in the game, or need a different version; the console names the mod.".into(),
+        );
+    }
+    if text.contains("You need to agree to the EULA") {
+        return Some("Accept the Minecraft EULA in the server's screen first.".into());
+    }
+    None
+}
+
 /// Remove terminal colour codes (Paper colours its log) so the console shows plain text.
 fn strip_ansi(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
@@ -743,6 +832,22 @@ pub async fn command(
         ));
     }
     let java = server_java(http, paths, &server.minecraft, progress).await?;
+    // Mods that need other mods: fetch what's missing before the server complains.
+    if let Some(loader) = server.kind.loader() {
+        let mods_dir = server.dir(paths).join("mods");
+        if let Ok((_, still)) =
+            crate::moddeps::install_missing_in(http, &mods_dir, &server.minecraft, loader, progress)
+                .await
+        {
+            for m in still {
+                eprintln!(
+                    "warning: {} needs {}, which isn't on Modrinth for this version",
+                    m.needed_by.join(", "),
+                    m.id
+                );
+            }
+        }
+    }
     // Skins: online mode against the local skin service, which lets every name in.
     let skins = if server.skins && crate::settings::Settings::load().skins {
         match crate::skins::ensure_injector(http, paths).await {

@@ -230,7 +230,12 @@ pub fn missing(mods_dir: &Path) -> Vec<Missing> {
 
 /// Modrinth projects that might be the mod with this id: its slug spelled a few ways, then
 /// a search for it among mods for this loader and version.
-async fn candidates(http: &reqwest::Client, instance: &Instance, id: &str) -> Vec<String> {
+async fn candidates(
+    http: &reqwest::Client,
+    minecraft: &str,
+    loader: Option<crate::loader::LoaderKind>,
+    id: &str,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for slug in [
         id.to_string(),
@@ -249,13 +254,10 @@ async fn candidates(http: &reqwest::Client, instance: &Instance, id: &str) -> Ve
             out.push(slug);
         }
     }
-    let loader = instance
-        .loader
-        .as_ref()
-        .map(|l| l.kind.name().to_lowercase());
+    let loader = loader.map(|l| l.name().to_lowercase());
     let mut facets = vec![
         vec!["project_type:mod".to_string()],
-        vec![format!("versions:{}", instance.minecraft_version())],
+        vec![format!("versions:{minecraft}")],
     ];
     if let Some(loader) = loader {
         facets.push(vec![format!("categories:{loader}")]);
@@ -320,7 +322,8 @@ pub async fn install_missing(
         }
         for need in wanted {
             tried.insert(need.id.clone());
-            for project in candidates(http, instance, &need.id).await {
+            let loader = instance.loader.as_ref().map(|l| l.kind);
+            for project in candidates(http, instance.minecraft_version(), loader, &need.id).await {
                 let before = jar_names(&mods_dir);
                 let Ok(titles) =
                     crate::mods::install(http, paths, instance, &project, progress).await
@@ -339,6 +342,112 @@ pub async fn install_missing(
         }
     }
     Ok((installed, missing(&mods_dir)))
+}
+
+/// [`install_missing`] for a folder that isn't an instance, such as a server's `mods`.
+pub async fn install_missing_in(
+    http: &reqwest::Client,
+    mods_dir: &Path,
+    minecraft: &str,
+    loader: crate::loader::LoaderKind,
+    progress: &ProgressFn,
+) -> Result<(Vec<String>, Vec<Missing>)> {
+    let mut installed = Vec::new();
+    let mut tried = HashSet::new();
+    for _ in 0..4 {
+        let wanted: Vec<Missing> = missing(mods_dir)
+            .into_iter()
+            .filter(|m| !tried.contains(&m.id))
+            .collect();
+        if wanted.is_empty() {
+            break;
+        }
+        for need in wanted {
+            tried.insert(need.id.clone());
+            for project in candidates(http, minecraft, Some(loader), &need.id).await {
+                let Ok(Some((title, mut file))) =
+                    crate::mods::best_file(http, &project, loader.mod_loaders(), minecraft).await
+                else {
+                    continue;
+                };
+                let dest = mods_dir.join(file.dest.file_name().unwrap_or_default());
+                if dest.exists() {
+                    continue;
+                }
+                file.dest = dest.clone();
+                progress(crate::download::Progress::Stage {
+                    name: title.clone(),
+                    total: 1,
+                });
+                if crate::download::fetch(http, &file).await.is_err() {
+                    continue;
+                }
+                progress(crate::download::Progress::Advance);
+                if missing(mods_dir).iter().any(|m| m.id == need.id) {
+                    // Not the right mod after all.
+                    let _ = std::fs::remove_file(&dest);
+                } else {
+                    installed.push(title);
+                    break;
+                }
+            }
+        }
+    }
+    Ok((installed, missing(mods_dir)))
+}
+
+/// The jar in `mods_dir` that provides mod `id`, if any.
+pub fn jar_for(mods_dir: &Path, id: &str) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(mods_dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "jar"))
+        .find(|jar| {
+            let Ok(file) = std::fs::File::open(jar) else {
+                return false;
+            };
+            let Ok(mut zip) = zip::ZipArchive::new(file) else {
+                return false;
+            };
+            let mut info = JarInfo::default();
+            inspect(&mut zip, false, &mut info);
+            info.provides.iter().any(|p| p == id)
+        })
+}
+
+/// Whether a Forge/NeoForge jar says the server doesn't need it (`displayTest` set to
+/// `IGNORE_SERVER_VERSION` or `IGNORE_ALL_VERSION`, or NeoForge's `clientSideOnly`):
+/// a sign it only runs in the game.
+pub(crate) fn forge_client_only(jar: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(jar) else {
+        return false;
+    };
+    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"]
+        .iter()
+        .filter_map(|name| read_entry(&mut zip, name))
+        .any(|bytes| {
+            let Ok(toml) = String::from_utf8_lossy(&bytes).parse::<toml::Table>() else {
+                return false;
+            };
+            let display = |t: &toml::Table| {
+                t.get("displayTest")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|d| d == "IGNORE_SERVER_VERSION" || d == "IGNORE_ALL_VERSION")
+            };
+            let mods = toml
+                .get("mods")
+                .and_then(|m| m.as_array())
+                .cloned()
+                .unwrap_or_default();
+            display(&toml)
+                || mods.iter().filter_map(|m| m.as_table()).any(|m| {
+                    display(m) || m.get("clientSideOnly").and_then(|v| v.as_bool()) == Some(true)
+                })
+        })
 }
 
 #[cfg(test)]

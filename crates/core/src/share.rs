@@ -1018,16 +1018,21 @@ pub fn detect_mod_ports(dir: &std::path::Path, game_port: u16) -> Vec<ExtraPort>
 }
 
 /// Advertise the tunnel to Minecraft's LAN discovery every 1.5 s, like a real LAN world.
+///
+/// Sent straight to the game on this computer (127.0.0.1, Minecraft's LAN listener takes
+/// plain packets too) rather than to the multicast group: Windows often sends multicast
+/// out of another network adapter (VPN, virtual machines), and the game never sees it.
+/// The entry then points at 127.0.0.1, which the tunnel accepts.
 async fn announce_on_lan(name: &str, port: u16) {
-    let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await else {
+    let Ok(socket) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await else {
         return;
     };
-    let _ = socket.set_multicast_loop_v4(true);
     // Minecraft can't show '[' or ']' inside the MOTD tags.
     let motd = name.replace(['[', ']'], "");
     let packet = format!("[MOTD]{motd}[/MOTD][AD]{port}[/AD]");
+    let to = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), LAN_GROUP.port());
     loop {
-        let _ = socket.send_to(packet.as_bytes(), LAN_GROUP).await;
+        let _ = socket.send_to(packet.as_bytes(), to).await;
         tokio::time::sleep(Duration::from_millis(1500)).await;
     }
 }

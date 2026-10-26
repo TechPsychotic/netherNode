@@ -2350,7 +2350,17 @@ impl App {
                         }
                     }
                     game::ServerUpdate::Ended(result) => {
-                        self.server_runs.remove(&name);
+                        let ended = self.server_runs.remove(&name);
+                        // Stopped before it was ever ready: say why, if we can tell.
+                        let why = ended.filter(|r| !r.ready).and_then(|r| {
+                            let dir = self
+                                .servers
+                                .iter()
+                                .find(|s| s.name == name)?
+                                .dir(&self.paths);
+                            let log: Vec<String> = r.log.into_iter().collect();
+                            nethernode_core::server::diagnose(&dir, &log)
+                        });
                         if let Some(share) = self
                             .shares
                             .iter_mut()
@@ -2359,9 +2369,12 @@ impl App {
                         {
                             let _ = stop.send(());
                         }
-                        match result {
-                            Ok(msg) => self.notice = Some((false, format!("{name}: {msg}"))),
-                            Err(e) => self.error(format!("{name}: {e}")),
+                        match (why, result) {
+                            (Some(why), _) => self.error(format!("{name} stopped: {why}")),
+                            (None, Ok(msg)) => {
+                                self.notice = Some((false, format!("{name}: {msg}")))
+                            }
+                            (None, Err(e)) => self.error(format!("{name}: {e}")),
                         }
                     }
                 }
