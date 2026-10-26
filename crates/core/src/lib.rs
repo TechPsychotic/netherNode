@@ -23,6 +23,7 @@ pub mod multiplayer;
 pub mod paths;
 pub mod rules;
 pub mod server;
+pub mod serverprops;
 pub mod settings;
 pub mod share;
 pub mod skins;

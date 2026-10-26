@@ -109,6 +109,11 @@ impl App {
                 self.dialog(join_friend_form(code, error.as_deref()))
             }
             Screen::Friends(view) => self.dialog(self.friends_screen(view)),
+            Screen::ServerSettings(form) => self.dialog(server_settings(
+                form,
+                self.servers.iter().find(|s| s.name == form.server),
+                self.server_runs.contains_key(&form.server),
+            )),
         };
         let mut content = column![self.top_bar()].spacing(14);
         if let Some((is_error, msg)) = &self.notice {
@@ -1148,14 +1153,7 @@ impl App {
             .style(theme::console)
             .into(),
         };
-        // Settings take the console's place (and scroll), so every option fits.
-        body = body.push(match &view.settings {
-            Some(form) => scrollable(server_settings(form, run.is_some()))
-                .style(theme::scroll)
-                .height(Length::Fill)
-                .into(),
-            None => console,
-        });
+        body = body.push(console);
         if run.is_some() {
             body = body.push(
                 row![
@@ -2536,153 +2534,216 @@ fn join_friend_form<'a>(code: &'a str, error: Option<&'a str>) -> Element<'a, Me
     .into()
 }
 
-fn server_settings<'a>(form: &'a crate::ServerSettingsForm, running: bool) -> Element<'a, Message> {
-    let input = |label: &'a str,
-                 value: &'a str,
-                 which: ServerField,
-                 hint: &'a str|
-     -> Element<'a, Message> {
-        field(
-            label,
-            text_input(hint, value)
-                .on_input(move |v| Message::ServerSettingsInput(which, v))
-                .style(theme::input)
-                .padding(8),
-        )
-    };
-    let choice = |label: &'a str,
-                  options: &'static [&'static str],
-                  value: &'a str,
-                  which: ServerField|
-     -> Element<'a, Message> {
-        field(
-            label,
-            row(options.iter().map(|o| {
-                button(text(*o).size(13))
-                    .padding([6, 12])
-                    .style(theme::segment(value == *o))
-                    .on_press(Message::ServerSettingsInput(which, o.to_string()))
-                    .into()
-            }))
-            .spacing(6)
-            .wrap()
-            .vertical_spacing(6),
-        )
-    };
-    let mut col = column![
+/// Full-page server settings: netherNode's options for the server, then every
+/// server.properties setting by group, with the right control for each.
+fn server_settings<'a>(
+    form: &'a crate::ServerSettingsForm,
+    server: Option<&'a nethernode_core::server::Server>,
+    running: bool,
+) -> Element<'a, Message> {
+    use nethernode_core::serverprops::{self, Group, Kind};
+    let save_row = || {
         row![
-            text("Server settings").size(16).font(BOLD),
             space::horizontal(),
-            button(text("Save").size(14).font(BOLD))
-                .padding([8, 18])
+            small_button("Cancel").on_press(Message::CloseServerSettings),
+            button(text("Save").size(15).font(BOLD))
+                .padding([10, 26])
                 .style(theme::play)
                 .on_press(Message::SaveServerSettings),
         ]
-        .align_y(Alignment::Center),
-        input(
-            "Message in the server list (MOTD)",
-            &form.motd,
-            ServerField::Motd,
-            "A Minecraft Server"
-        ),
+        .spacing(10)
+        .align_y(Alignment::Center)
+    };
+    let help = |t: &'a str| text(t).size(12).color(theme::MUTED);
+    let section = |title: &'a str| text(title).size(18).font(BOLD).color(theme::VIOLET_BRIGHT);
+
+    let mut col = column![
         row![
-            input(
-                "Max players",
-                &form.max_players,
-                ServerField::MaxPlayers,
-                "10"
-            ),
-            input(
-                "Memory limit in MB (empty = automatic)",
-                &form.max_memory,
-                ServerField::MaxMemory,
-                "automatic"
-            ),
+            text(format!("Settings: {}", clip(&form.server, 22)))
+                .size(26)
+                .font(BOLD)
+                .width(Length::Fill),
+            small_button("Cancel").on_press(Message::CloseServerSettings),
+            button(text("Save").size(15).font(BOLD))
+                .padding([10, 26])
+                .style(theme::play)
+                .on_press(Message::SaveServerSettings),
         ]
-        .spacing(10),
-        choice(
-            "Game mode",
-            &["survival", "creative", "adventure", "spectator"],
-            &form.gamemode,
-            ServerField::Gamemode
-        ),
-        choice(
-            "Difficulty",
-            &["peaceful", "easy", "normal", "hard"],
-            &form.difficulty,
-            ServerField::Difficulty
-        ),
-        checkbox(form.pvp)
-            .label("Players can hurt each other (PvP)")
-            .on_toggle(|on| Message::ServerSettingsToggle(ServerField::Pvp, on)),
-        checkbox(form.whitelist_on)
-            .label("Only allow these players (whitelist)")
-            .on_toggle(|on| Message::ServerSettingsToggle(ServerField::WhitelistOn, on)),
+        .spacing(10)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(16);
+    if let Some(server) = server {
+        col = col.push(
+            text(format!(
+                "{} server · Minecraft {} · port {}",
+                server.kind.name(),
+                server.minecraft,
+                server.port
+            ))
+            .size(13)
+            .color(theme::MUTED),
+        );
+    }
+    if running {
+        col = col.push(
+            text("The server is running: changes apply the next time it starts.")
+                .size(13)
+                .color(theme::WARNING),
+        );
+    }
+
+    // netherNode's own options for this server.
+    col = col.push(section("This server in netherNode"));
+    col = col.push(field(
+        "Memory limit in MB (empty = automatic)",
+        text_input("automatic", &form.max_memory)
+            .on_input(|v| Message::ServerSettingsInput(ServerField::MaxMemory, v))
+            .style(theme::input)
+            .padding(8),
+    ));
+    col = col.push(
         column![
             checkbox(form.skins)
                 .label("Show players' skins")
                 .on_toggle(|on| Message::ServerSettingsToggle(ServerField::Skins, on)),
-            text("Players then need netherNode (with skins on) to join. Turn off to let any offline launcher in.")
-                .size(12)
-                .color(theme::MUTED),
+            help("Players then need netherNode (with skins on) to join. Turn off to let any offline launcher in."),
         ]
         .spacing(4),
-        input(
-            "Extra ports for friends (mods like voice chat; Simple Voice Chat is found automatically)",
-            &form.extra_ports,
-            ServerField::ExtraPorts,
-            "e.g. UDP 24454, TCP 8100"
-        ),
+    );
+    col = col.push(
+        column![
+            field(
+                "Extra ports for friends",
+                text_input("e.g. UDP 24454, TCP 8100", &form.extra_ports)
+                    .on_input(|v| Message::ServerSettingsInput(ServerField::ExtraPorts, v))
+                    .style(theme::input)
+                    .padding(8),
+            ),
+            help("For mods that need their own port. Simple Voice Chat is found automatically."),
+        ]
+        .spacing(4),
+    );
+    let mut whitelist = column![
+        checkbox(form.whitelist_on)
+            .label("Only allow these players (whitelist)")
+            .on_toggle(|on| Message::ServerSettingsToggle(ServerField::WhitelistOn, on)),
     ]
-    .spacing(12);
+    .spacing(6);
+    if form.whitelist_on {
+        whitelist = whitelist.push(
+            text_input("Steve, Alex", &form.whitelist)
+                .on_input(|v| Message::ServerSettingsInput(ServerField::Whitelist, v))
+                .style(theme::input)
+                .padding(8),
+        );
+    }
+    col = col.push(whitelist);
+
+    // One control per known setting.
+    let control = |key: &'a str,
+                   label: &'a str,
+                   about: &'a str,
+                   kind: Kind,
+                   value: &'a str|
+     -> Element<'a, Message> {
+        let key_owned = key.to_string();
+        match kind {
+            Kind::Bool => column![
+                checkbox(value == "true").label(label).on_toggle(
+                    move |on| Message::ServerProperty(key_owned.clone(), on.to_string())
+                ),
+                help(about),
+            ]
+            .spacing(4)
+            .into(),
+            Kind::Choice(choices) => column![
+                text(label).size(13).color(theme::MUTED),
+                row(choices.iter().map(|c| {
+                    button(text(*c).size(13))
+                        .padding([6, 12])
+                        .style(theme::segment(value == *c))
+                        .on_press(Message::ServerProperty(key.to_string(), c.to_string()))
+                        .into()
+                }))
+                .spacing(6)
+                .wrap()
+                .vertical_spacing(6),
+                help(about),
+            ]
+            .spacing(6)
+            .into(),
+            Kind::Number { .. } | Kind::Text => column![
+                text(label).size(13).color(theme::MUTED),
+                text_input("", value)
+                    .on_input(move |v| Message::ServerProperty(key_owned.clone(), v))
+                    .style(theme::input)
+                    .padding(8),
+                help(about),
+            ]
+            .spacing(4)
+            .into(),
+        }
+    };
+    for group in Group::ALL {
+        if group == Group::Advanced && !form.show_advanced {
+            continue;
+        }
+        let settings: Vec<_> = serverprops::SETTINGS
+            .iter()
+            .filter(|s| s.group == group)
+            .filter_map(|s| form.values.get(s.key).map(|v| (s, v)))
+            .collect();
+        if settings.is_empty() {
+            continue;
+        }
+        col = col.push(section(group.title()));
+        for (s, value) in settings {
+            col = col.push(control(s.key, s.label, s.help, s.kind, value));
+        }
+    }
     col = col.push(
         button(
-            text(if form.show_all {
-                "▾ All settings (server.properties)"
+            text(if form.show_advanced {
+                "▾ Hide advanced settings"
             } else {
-                "▸ All settings (server.properties)"
+                "▸ Show advanced settings (RCON, query, and everything else in server.properties)"
             })
             .size(13),
         )
         .style(theme::link)
-        .on_press(Message::ToggleAllServerSettings),
+        .on_press(Message::ToggleAdvancedServerSettings),
     );
-    if form.show_all {
-        let mut all = column![].spacing(6);
-        for (i, (key, value)) in form.all.iter().enumerate() {
-            all = all.push(
-                row![
-                    text(key.as_str())
-                        .size(12)
-                        .font(MONO)
-                        .width(Length::FillPortion(2)),
-                    text_input("", value)
-                        .on_input(move |v| Message::ServerPropertyInput(i, v))
-                        .style(theme::input)
-                        .size(13)
-                        .padding(6)
-                        .width(Length::FillPortion(3)),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            );
+    if form.show_advanced {
+        // Settings the server has that netherNode doesn't describe (newer versions, Paper,
+        // mods): plain text.
+        let others: Vec<_> = form
+            .values
+            .iter()
+            .filter(|(k, _)| serverprops::find(k).is_none())
+            .collect();
+        if !others.is_empty() {
+            col = col.push(section("Other"));
+            for (key, value) in others {
+                let key_owned = key.clone();
+                col = col.push(
+                    row![
+                        text(key.as_str())
+                            .size(12)
+                            .font(MONO)
+                            .width(Length::FillPortion(2)),
+                        text_input("", value)
+                            .on_input(move |v| Message::ServerProperty(key_owned.clone(), v))
+                            .style(theme::input)
+                            .size(13)
+                            .padding(6)
+                            .width(Length::FillPortion(3)),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
         }
-        col = col.push(all);
     }
-    if form.whitelist_on {
-        col = col.push(input(
-            "Allowed names (comma separated)",
-            &form.whitelist,
-            ServerField::Whitelist,
-            "Steve, Alex",
-        ));
-    }
-    if running {
-        col = col.push(
-            text("Changes apply the next time the server starts.")
-                .size(12)
-                .color(theme::WARNING),
-        );
-    }
-    container(col).padding(14).style(theme::row_item).into()
+    col.push(save_row()).into()
 }

@@ -156,9 +156,26 @@ pub fn update(app: &mut App, step: Step) -> Task<Message> {
                     send(app, Message::ShowFriends);
                     6000
                 }
+                "server-settings-save" => {
+                    send(app, Message::EditServerSettings);
+                    send(
+                        app,
+                        Message::ServerProperty("difficulty".into(), "hard".into()),
+                    );
+                    send(
+                        app,
+                        Message::ServerProperty("view-distance".into(), "12".into()),
+                    );
+                    send(
+                        app,
+                        Message::ServerProperty("hardcore".into(), "true".into()),
+                    );
+                    send(app, Message::SaveServerSettings);
+                    800
+                }
                 "server-settings-all" => {
                     send(app, Message::EditServerSettings);
-                    send(app, Message::ToggleAllServerSettings);
+                    send(app, Message::ToggleAdvancedServerSettings);
                     800
                 }
                 "new-server-from" => {

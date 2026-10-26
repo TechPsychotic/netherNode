@@ -199,39 +199,24 @@ pub struct ServersView {
     command: String,
     /// Two-click delete.
     confirm_delete: bool,
-    settings: Option<ServerSettingsForm>,
 }
 
-/// Editable server.properties values (and the whitelist).
+/// The full-page server settings: every server.properties value plus netherNode's own
+/// options for the server.
 pub struct ServerSettingsForm {
-    motd: String,
-    max_players: String,
-    gamemode: String,
-    difficulty: String,
-    pvp: bool,
+    server: String,
+    /// Every setting, by key: the file's values, and Minecraft's defaults for the known
+    /// settings the file doesn't have yet (a server that hasn't started).
+    values: std::collections::BTreeMap<String, String>,
+    /// The file as read, to only write what's there or changed.
+    original: std::collections::BTreeMap<String, String>,
     whitelist_on: bool,
     whitelist: String,
     max_memory: String,
     skins: bool,
     extra_ports: String,
-    /// Every other server.properties entry, editable as text.
-    all: Vec<(String, String)>,
-    show_all: bool,
+    show_advanced: bool,
 }
-
-/// server.properties keys the friendly settings (or netherNode itself) manage.
-const MANAGED_PROPERTIES: &[&str] = &[
-    "motd",
-    "max-players",
-    "gamemode",
-    "difficulty",
-    "pvp",
-    "white-list",
-    "enforce-whitelist",
-    "online-mode",
-    "server-port",
-    "enforce-secure-profile",
-];
 
 /// "UDP 24454, TCP 8100" ⇄ ports. Bare numbers mean UDP (what voice mods use).
 fn parse_ports(text: &str) -> Result<Vec<nethernode_core::share::ExtraPort>, String> {
@@ -321,6 +306,7 @@ pub enum Screen {
     Settings(SettingsForm),
     JoinFriend { code: String, error: Option<String> },
     Friends(FriendsView),
+    ServerSettings(ServerSettingsForm),
     Servers(ServersView),
     NewServer(NewServerForm),
 }
@@ -364,11 +350,6 @@ pub struct NewInstanceForm {
 /// Fields of the server settings form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerField {
-    Motd,
-    MaxPlayers,
-    Gamemode,
-    Difficulty,
-    Pvp,
     WhitelistOn,
     Whitelist,
     MaxMemory,
@@ -614,8 +595,10 @@ pub enum Message {
     ServerSettingsInput(ServerField, String),
     ServerSettingsToggle(ServerField, bool),
     /// Edit the n-th "all settings" entry of server.properties.
-    ServerPropertyInput(usize, String),
-    ToggleAllServerSettings,
+    /// A server.properties value changed.
+    ServerProperty(String, String),
+    ToggleAdvancedServerSettings,
+    CloseServerSettings,
     SaveServerSettings,
     OptiFineAlternative(bool),
     NewAddWorlds(bool),
@@ -2098,14 +2081,12 @@ impl App {
                     selected,
                     command: String::new(),
                     confirm_delete: false,
-                    settings: None,
                 });
             }
             Message::SelectServer(name) => {
                 if let Screen::Servers(v) = &mut self.screen {
                     v.selected = Some(name);
                     v.confirm_delete = false;
-                    v.settings = None;
                 }
             }
             Message::ShowNewServer => {
@@ -2222,7 +2203,6 @@ impl App {
                     selected: Some(name.clone()),
                     command: String::new(),
                     confirm_delete: false,
-                    settings: None,
                 });
                 let paths = self.paths.clone();
                 let stream = game::job(move |progress| async move {
@@ -2516,7 +2496,7 @@ impl App {
                 Err(e) => self.error(format!("Couldn't import the world: {e}")),
             },
             Message::EditServerSettings => {
-                let Screen::Servers(v) = &mut self.screen else {
+                let Screen::Servers(v) = &self.screen else {
                     return Task::none();
                 };
                 let Some(server) = v
@@ -2526,97 +2506,88 @@ impl App {
                 else {
                     return Task::none();
                 };
-                let props = nethernode_core::server::properties(&server.dir(&self.paths));
-                let get = |k: &str, default: &str| {
-                    props.get(k).cloned().unwrap_or_else(|| default.to_string())
-                };
-                let all = props
+                use nethernode_core::serverprops;
+                let original = nethernode_core::server::properties(&server.dir(&self.paths));
+                let mut values: std::collections::BTreeMap<String, String> = serverprops::SETTINGS
                     .iter()
-                    .filter(|(k, _)| !MANAGED_PROPERTIES.contains(&k.as_str()))
-                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .map(|s| (s.key.to_string(), s.default.to_string()))
                     .collect();
-                v.settings = Some(ServerSettingsForm {
-                    skins: server.skins,
-                    extra_ports: format_ports(&server.extra_ports),
-                    all,
-                    show_all: false,
-                    motd: get("motd", ""),
-                    max_players: get("max-players", "10"),
-                    gamemode: get("gamemode", "survival"),
-                    difficulty: get("difficulty", "normal"),
-                    pvp: get("pvp", "true") == "true",
-                    whitelist_on: get("white-list", "false") == "true",
+                values.extend(original.iter().map(|(k, v)| (k.clone(), v.clone())));
+                values.retain(|k, _| !serverprops::MANAGED.contains(&k.as_str()));
+                self.screen = Screen::ServerSettings(ServerSettingsForm {
+                    server: server.name.clone(),
+                    whitelist_on: original.get("white-list").is_some_and(|v| v == "true"),
                     whitelist: nethernode_core::server::whitelist(&self.paths, server).join(", "),
                     max_memory: server
                         .max_memory_mb
                         .map(|m| m.to_string())
                         .unwrap_or_default(),
+                    skins: server.skins,
+                    extra_ports: format_ports(&server.extra_ports),
+                    values,
+                    original: original.into_iter().collect(),
+                    show_advanced: false,
                 });
             }
             Message::ServerSettingsInput(field, value) => {
-                if let Screen::Servers(ServersView {
-                    settings: Some(f), ..
-                }) = &mut self.screen
-                {
+                if let Screen::ServerSettings(f) = &mut self.screen {
                     match field {
-                        ServerField::Motd => f.motd = value,
-                        ServerField::MaxPlayers => {
-                            f.max_players =
-                                value.chars().filter(char::is_ascii_digit).take(4).collect()
-                        }
-                        ServerField::Gamemode => f.gamemode = value,
-                        ServerField::Difficulty => f.difficulty = value,
                         ServerField::Whitelist => f.whitelist = value,
                         ServerField::MaxMemory => {
                             f.max_memory =
                                 value.chars().filter(char::is_ascii_digit).take(6).collect()
                         }
                         ServerField::ExtraPorts => f.extra_ports = value,
-                        ServerField::Pvp | ServerField::WhitelistOn | ServerField::Skins => {}
+                        ServerField::WhitelistOn | ServerField::Skins => {}
                     }
                 }
             }
             Message::ServerSettingsToggle(field, on) => {
-                if let Screen::Servers(ServersView {
-                    settings: Some(f), ..
-                }) = &mut self.screen
-                {
+                if let Screen::ServerSettings(f) = &mut self.screen {
                     match field {
-                        ServerField::Pvp => f.pvp = on,
                         ServerField::WhitelistOn => f.whitelist_on = on,
                         ServerField::Skins => f.skins = on,
                         _ => {}
                     }
                 }
             }
-            Message::ServerPropertyInput(index, value) => {
-                if let Screen::Servers(ServersView {
-                    settings: Some(f), ..
-                }) = &mut self.screen
-                    && let Some(entry) = f.all.get_mut(index)
-                {
-                    entry.1 = value;
+            Message::ServerProperty(key, value) => {
+                if let Screen::ServerSettings(f) = &mut self.screen {
+                    f.values.insert(key, value);
                 }
             }
-            Message::ToggleAllServerSettings => {
-                if let Screen::Servers(ServersView {
-                    settings: Some(f), ..
-                }) = &mut self.screen
-                {
-                    f.show_all = !f.show_all;
+            Message::ToggleAdvancedServerSettings => {
+                if let Screen::ServerSettings(f) = &mut self.screen {
+                    f.show_advanced = !f.show_advanced;
                 }
             }
             Message::SaveServerSettings => {
-                use nethernode_core::server;
-                let Screen::Servers(v) = &mut self.screen else {
+                use nethernode_core::{server, serverprops};
+                let Screen::ServerSettings(f) = &self.screen else {
                     return Task::none();
                 };
-                let (Some(name), Some(f)) = (v.selected.clone(), v.settings.as_ref()) else {
-                    return Task::none();
-                };
+                let name = f.server.clone();
                 let Some(mut srv) = self.servers.iter().find(|s| s.name == name).cloned() else {
                     return Task::none();
                 };
+                // Write what the file has or what differs from Minecraft's default.
+                let mut changes: Vec<(String, String)> = Vec::new();
+                for (key, value) in &f.values {
+                    let value = match serverprops::validate(key, value) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.error(e);
+                            return Task::none();
+                        }
+                    };
+                    let default = serverprops::find(key).map(|s| s.default);
+                    let in_file = f.original.get(key);
+                    if in_file.is_some_and(|v| *v != value)
+                        || (in_file.is_none() && default != Some(value.as_str()))
+                    {
+                        changes.push((key.clone(), value));
+                    }
+                }
                 let names: Vec<String> = f
                     .whitelist
                     .split([',', ' ', '\n'])
@@ -2633,50 +2604,46 @@ impl App {
                         return Task::none();
                     }
                 };
-                let dir = srv.dir(&self.paths);
-                let pvp = if f.pvp { "true" } else { "false" };
-                let others: Vec<(&str, &str)> =
-                    f.all.iter().map(|(k, v)| (k.as_str(), v.trim())).collect();
-                let result = server::set_properties(&dir, &others)
-                    .and_then(|()| {
-                        server::set_properties(
-                            &dir,
-                            &[
-                                ("motd", f.motd.as_str()),
-                                (
-                                    "max-players",
-                                    if f.max_players.is_empty() {
-                                        "10"
-                                    } else {
-                                        f.max_players.as_str()
-                                    },
-                                ),
-                                ("gamemode", f.gamemode.as_str()),
-                                ("difficulty", f.difficulty.as_str()),
-                                ("pvp", pvp),
-                            ],
-                        )
-                    })
-                    .and_then(|()| server::set_whitelist(&self.paths, &srv, f.whitelist_on, &names))
+                let whitelist_on = f.whitelist_on;
+                let pairs: Vec<(&str, &str)> = changes
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                let result = server::set_properties(&srv.dir(&self.paths), &pairs)
+                    .and_then(|()| server::set_whitelist(&self.paths, &srv, whitelist_on, &names))
                     .and_then(|()| srv.save(&self.paths));
                 match result {
                     Ok(()) => {
-                        v.settings = None;
                         self.servers = server::Server::list(&self.paths);
                         let running = self.server_runs.contains_key(&name);
                         self.notice = Some((
                             false,
                             if running {
-                                "Saved. Restart the server to apply.".into()
+                                format!("Saved. Restart {name} to apply the changes.")
                             } else {
-                                "Server settings saved".into()
+                                format!("Settings for {name} saved")
                             },
                         ));
+                        self.screen = Screen::Servers(ServersView {
+                            selected: Some(name),
+                            command: String::new(),
+                            confirm_delete: false,
+                        });
                     }
                     Err(e) => self.error(e.to_string()),
                 }
             }
-
+            Message::CloseServerSettings => {
+                let name = match &self.screen {
+                    Screen::ServerSettings(f) => Some(f.server.clone()),
+                    _ => None,
+                };
+                self.screen = Screen::Servers(ServersView {
+                    selected: name,
+                    command: String::new(),
+                    confirm_delete: false,
+                });
+            }
             Message::LoaderSupport(mc, kind, result) => {
                 // A failed check (e.g. offline) leaves the loader selectable.
                 let state = match result {
