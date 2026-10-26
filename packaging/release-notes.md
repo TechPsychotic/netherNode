@@ -1,4 +1,4 @@
-**netherNode 1.2**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
+**netherNode 1.2.1**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
 
 ## Downloads
 
@@ -13,6 +13,11 @@
 - **Windows:** unzip, run `nethernode-gui.exe`. If SmartScreen appears: *More info → Run anyway*.
 - **macOS:** open the `.dmg`, drag netherNode to Applications, then right-click it → *Open* → *Open* (first time only). If macOS says it's damaged: `xattr -dr com.apple.quarantine /Applications/netherNode.app`.
 - **Linux:** extract, then run `./install.sh` (adds it to the app menu) or `./nethernode-gui` directly.
+
+## Fixed in 1.2.1
+
+- **Server settings** are a full page: netherNode's options (memory, skins, extra ports, whitelist), then every `server.properties` setting in groups with a plain explanation and the right control (tick box, choices or a checked number). Server-specific and mod settings stay editable under *Advanced*.
+- **Friends:** the screen always shows how to add friends, with a connecting/connected status; if it can't connect it says why and retries.
 
 ## New in 1.2
 

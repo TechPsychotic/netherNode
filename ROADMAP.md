@@ -2,7 +2,7 @@
 
 An offline-accounts Minecraft launcher for Linux, macOS and Windows, written in Rust:
 `crates/core` (library), `crates/cli` (`nethernode`) and `crates/gui` (`nethernode-gui`, iced).
-Current release: **1.2.0**.
+Current release: **1.2.1**.
 
 ## Ground rules
 
@@ -53,7 +53,7 @@ Current release: **1.2.0**.
 | Kinds | Vanilla, Fabric, Paper, Forge and NeoForge (official installer with `--installServer`, finished by netherNode's processor runner when a checksum is too strict, as on Fedora's zlib-ng) | Each kind started; Forge 1.20.1 joined by a real client |
 | From an instance | Same version, loader and mods; client-only mods left out (Modrinth `server_side: unsupported`, `fabric.mod.json` `environment: client`); configs copied | Forge 1.20.1 instance → server |
 | Running | Several at once on their own ports; console with commands; graceful stop; desktop notification when ready | Each server alone; two at once not yet tested |
-| Settings | MOTD, players, game mode, difficulty, PvP, whitelist (offline UUIDs), memory, skins, extra ports, and every other `server.properties` entry | Written to `server.properties` (unit tests) |
+| Settings | Full page: memory, skins, extra ports, whitelist (offline UUIDs), then every `server.properties` setting grouped with explanations and typed controls (catalog in `serverprops.rs`); unknown keys editable as text; only changed values written | Changes through the app wrote exactly the edited lines |
 | Multiplayer list | Each server is added to `servers.dat` of every instance with the same version (and loader), as "*name* (this PC)" | Shown in the game's Multiplayer screen |
 | Skins | Online mode against the local skin service when skins are on (players need netherNode); offline mode when off | Forge server join with skins |
 
