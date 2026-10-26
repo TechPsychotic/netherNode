@@ -2,7 +2,7 @@
 
 An offline-accounts Minecraft launcher for Linux, macOS and Windows, written in Rust:
 `crates/core` (library), `crates/cli` (`nethernode`) and `crates/gui` (`nethernode-gui`, iced).
-Current release: **1.2.1**.
+Current release: **1.2.2**.
 
 ## Ground rules
 

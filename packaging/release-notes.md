@@ -1,4 +1,4 @@
-**netherNode 1.2.1**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
+**netherNode 1.2.2**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
 
 ## Downloads
 
@@ -13,6 +13,13 @@
 - **Windows:** unzip, run `nethernode-gui.exe`. If SmartScreen appears: *More info → Run anyway*.
 - **macOS:** open the `.dmg`, drag netherNode to Applications, then right-click it → *Open* → *Open* (first time only). If macOS says it's damaged: `xattr -dr com.apple.quarantine /Applications/netherNode.app`.
 - **Linux:** extract, then run `./install.sh` (adds it to the app menu) or `./nethernode-gui` directly.
+
+## Fixed in 1.2.2
+
+- **Joining friends works on Windows and Fedora:** the tunnel accepts IPv6 `localhost`, which those systems use first. Direct Connect, *Play it* and Simple Voice Chat were refused before.
+- **Shared worlds show in your friend's LAN list** reliably (announced straight to their game instead of over multicast, which Windows sent out of the wrong adapter).
+- **Voice chat:** large voice packets no longer get lost in the tunnel.
+- **Modded servers:** missing dependencies are installed before each start; a mod that only works in the game is moved out of the server with a message if the server crashes on it; other start-up crashes (missing mods, busy port, out of memory) are explained.
 
 ## Fixed in 1.2.1
 
