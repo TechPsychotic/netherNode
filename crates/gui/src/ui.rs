@@ -14,8 +14,9 @@ use nethernode_core::loader::LoaderKind;
 use crate::background::Portal;
 use crate::theme;
 use crate::{
-    App, EditForm, FolderKind, Load, LoaderPick, Message, ModsTab, ModsView, NewInstanceForm,
-    NewServerForm, PacksView, Screen, ServerField, ServersView, SettingsForm, VersionFilter,
+    App, EditForm, FolderKind, FriendsView, Load, LoaderPick, Message, ModsTab, ModsView,
+    NewInstanceForm, NewServerForm, PacksView, Screen, ServerField, ServersView, SettingsForm,
+    VersionFilter,
 };
 
 /// Obsidian block size in the background, logical px. Content sits inside this frame.
@@ -42,6 +43,18 @@ fn loader_color(kind: Option<LoaderKind>) -> Color {
     }
 }
 
+/// Shorten a long name to `max` characters with an ellipsis, so it can't push buttons
+/// off screen.
+pub(crate) fn clip(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        name.to_string()
+    } else {
+        let mut short: String = name.chars().take(max.saturating_sub(1)).collect();
+        short.push('…');
+        short
+    }
+}
+
 fn loader_label(instance: &Instance) -> String {
     match &instance.loader {
         None => "Vanilla".into(),
@@ -57,7 +70,7 @@ fn chip<'a>(label: impl text::IntoFragment<'a>, color: Color) -> Element<'a, Mes
         .into()
 }
 
-fn small_button(label: &str) -> button::Button<'_, Message> {
+fn small_button<'a>(label: impl text::IntoFragment<'a>) -> button::Button<'a, Message> {
     button(text(label).size(14))
         .padding([8, 14])
         .style(theme::glass_button)
@@ -95,6 +108,7 @@ impl App {
             Screen::JoinFriend { code, error } => {
                 self.dialog(join_friend_form(code, error.as_deref()))
             }
+            Screen::Friends(view) => self.dialog(self.friends_screen(view)),
         };
         let mut content = column![self.top_bar()].spacing(14);
         if let Some((is_error, msg)) = &self.notice {
@@ -154,7 +168,9 @@ impl App {
             .spacing(8)
             .align_y(Alignment::Center);
         right = right
+            .push(small_button("Home").on_press(Message::ShowHome))
             .push(small_button("Servers").on_press(Message::ShowServers))
+            .push(small_button(self.friends_label()).on_press(Message::ShowFriends))
             .push(small_button("Join friend").on_press(Message::ShowJoinFriend))
             .push(small_button("Modpacks").on_press(Message::ShowModpacks))
             .push(small_button("Accounts").on_press(Message::ShowAccounts))
@@ -253,7 +269,7 @@ impl App {
             let card = container(
                 column![
                     self.instance_icon(instance, 52.0),
-                    text(&instance.name)
+                    text(clip(&instance.name, 15))
                         .size(14)
                         .font(BOLD)
                         .width(Length::Fill)
@@ -361,7 +377,7 @@ impl App {
             row![
                 self.instance_icon(instance, 64.0),
                 column![
-                    text(&instance.name).size(24).font(BOLD),
+                    text(clip(&instance.name, 26)).size(24).font(BOLD),
                     row![
                         chip(
                             format!("Minecraft {}", instance.minecraft_version()),
@@ -389,7 +405,11 @@ impl App {
         // Clickable while the game runs: the world is found in the log or, failing that,
         // from the game's LAN announcement when clicked.
         let running = self.runs.get(&name).is_some_and(|r| r.heap.is_some());
-        let invite: Option<Element<'_, Message>> = self.host_share.is_none().then(|| {
+        let shared = self
+            .shares
+            .iter()
+            .any(|s| !s.is_server && s.instance == name);
+        let invite: Option<Element<'_, Message>> = (!shared).then(|| {
             button(text("Invite friends").size(14).font(BOLD))
                 .padding([8, 16])
                 .style(theme::play)
@@ -397,7 +417,7 @@ impl App {
                 .into()
         });
         // While the game runs, the console area already explains Open to LAN.
-        let invite_hint = (!self.runs.contains_key(&name) && self.host_share.is_none()).then(|| {
+        let invite_hint = (!self.runs.contains_key(&name) && !shared).then(|| {
             text("To invite friends: play, load a world, then Esc → Open to LAN. Friends use Join friend.")
                 .size(12)
                 .color(theme::MUTED)
@@ -539,10 +559,12 @@ impl App {
             Some(i) => format!("Minecraft {} · {}", i.minecraft_version(), loader_label(i)),
             None => "Create an instance to play".into(),
         };
+        // Same shape as "Playing as": label above, controls in one row.
         let target: Element<'_, Message> = column![
             text("INSTANCE").size(11).color(theme::MUTED),
-            picker,
-            text(detail).size(12).color(theme::MUTED),
+            row![picker, text(detail).size(12).color(theme::MUTED)]
+                .spacing(10)
+                .align_y(Alignment::Center),
         ]
         .spacing(4)
         .into();
@@ -869,6 +891,8 @@ impl App {
             ServerKind::Vanilla => theme::SUCCESS,
             ServerKind::Fabric => Color::from_rgb8(0xe8, 0xc9, 0x9b),
             ServerKind::Paper => Color::from_rgb8(0x7f, 0xb6, 0xff),
+            ServerKind::Forge => Color::from_rgb8(0xe0, 0x8a, 0x5a),
+            ServerKind::NeoForge => Color::from_rgb8(0xf0, 0xa0, 0x50),
         };
         let status = |name: &str| -> (&'static str, Color) {
             if self.server_jobs.contains_key(name) {
@@ -890,7 +914,10 @@ impl App {
                 button(
                     column![
                         row![
-                            text(&srv.name).size(15).font(BOLD).width(Length::Fill),
+                            text(clip(&srv.name, 22))
+                                .size(15)
+                                .font(BOLD)
+                                .width(Length::Fill),
                             text(label).size(11).color(color)
                         ]
                         .align_y(Alignment::Center),
@@ -976,7 +1003,7 @@ impl App {
         let eula = nethernode_core::server::eula_accepted(&self.paths, srv);
         let (label, color) = status(&name);
         let header = column![
-            text(&srv.name).size(24).font(BOLD),
+            text(clip(&srv.name, 26)).size(24).font(BOLD),
             row![
                 chip(srv.kind.name(), kind_color(srv.kind)),
                 chip(format!("Minecraft {}", srv.minecraft), theme::VIOLET_BRIGHT),
@@ -1003,10 +1030,13 @@ impl App {
         let deleting = view.confirm_delete;
         let actions = row![
             main_button,
-            small_button("Play on it")
-                .on_press_maybe(ready.then(|| Message::PlayOnServer(name.clone()))),
             small_button("Invite friends").on_press_maybe(
-                (ready && self.host_share.is_none()).then(|| Message::InviteServer(name.clone()))
+                (ready
+                    && !self
+                        .shares
+                        .iter()
+                        .any(|s| s.is_server && s.instance == name))
+                .then(|| Message::InviteServer(name.clone()))
             ),
             small_button("Settings").on_press(Message::EditServerSettings),
             small_button("Folder").on_press(Message::OpenFolder(srv.dir(&self.paths))),
@@ -1070,7 +1100,9 @@ impl App {
         if ready {
             body = body.push(
                 text(format!(
-                    "Players on this PC can also join with Direct Connect to localhost:{}.",
+                    "To play on it yourself: in Minecraft, Multiplayer → \"{} (this PC)\" (added to your Minecraft {} instances), or Direct Connect to localhost:{}.",
+                    clip(&srv.name, 24),
+                    srv.minecraft,
                     srv.port
                 ))
                 .size(12)
@@ -1177,6 +1209,12 @@ impl App {
             ServerKind::Paper => {
                 "Faster, and supports plugins (Bukkit/Paper). Vanilla clients join as normal."
             }
+            ServerKind::Forge => {
+                "Forge mods on the server. Friends get the same mods through Join friend."
+            }
+            ServerKind::NeoForge => {
+                "NeoForge mods on the server. Friends get the same mods through Join friend."
+            }
         };
         let missing: Vec<&str> = ServerKind::ALL
             .into_iter()
@@ -1185,7 +1223,7 @@ impl App {
             .collect();
         let mut kind_section = column![
             text("Server type").size(13).color(theme::MUTED),
-            row(kinds).spacing(6)
+            row(kinds).spacing(6).wrap().vertical_spacing(6)
         ]
         .spacing(8);
         if !missing.is_empty() {
@@ -1200,6 +1238,59 @@ impl App {
         }
         kind_section = kind_section.push(text(about).size(12).color(theme::MUTED));
         let can_create = form.version.is_some() && form.eula && !unavailable(form.kind);
+        // "Based on an instance": same version, loader and mods (Quilt has no servers).
+        const NOTHING: &str = "Nothing: choose the version and type below";
+        let bases: Vec<String> = std::iter::once(NOTHING.to_string())
+            .chain(
+                self.instances
+                    .iter()
+                    .filter(|i| ServerKind::for_loader(i.loader.as_ref().map(|l| l.kind)).is_some())
+                    .map(|i| i.name.clone()),
+            )
+            .collect();
+        let based_on =
+            column![
+            field(
+                "Based on an instance (copies its version, loader and mods)",
+                pick_list(
+                    bases,
+                    Some(form.from_instance.clone().unwrap_or_else(|| NOTHING.to_string())),
+                    |choice: String| Message::NewServerFrom((choice != NOTHING).then_some(choice)),
+                )
+                .style(theme::picker)
+                .padding(10)
+                .width(Length::Fill),
+            ),
+            text(if form.from_instance.is_some() {
+                "Mods that only work in the game (like Sodium or Iris) are left out of the server."
+            } else {
+                ""
+            })
+            .size(12)
+            .color(theme::MUTED),
+        ]
+            .spacing(6);
+        let version_field: Element<'a, Message> = if form.from_instance.is_some() {
+            text(format!("Minecraft {mc} · {}", form.kind.name()))
+                .size(14)
+                .into()
+        } else {
+            column![
+                field(
+                    "Minecraft version",
+                    pick_list(choices, selected, |c: crate::VersionChoice| {
+                        Message::NewServerVersion(c.id)
+                    })
+                    .placeholder("Choose a version")
+                    .style(theme::picker)
+                    .padding(10)
+                    .width(Length::Fill),
+                ),
+                kind_section,
+            ]
+            .spacing(18)
+            .into()
+        };
         column![
             row![
                 text("New server").size(26).font(BOLD),
@@ -1219,15 +1310,8 @@ impl App {
                     .style(theme::input)
                     .padding(10),
             ),
-            field(
-                "Minecraft version",
-                pick_list(choices, selected, |c: crate::VersionChoice| Message::NewServerVersion(c.id))
-                    .placeholder("Choose a version")
-                    .style(theme::picker)
-                    .padding(10)
-                    .width(Length::Fill),
-            ),
-            kind_section,
+            based_on,
+            version_field,
             column![
                 checkbox(form.eula).label("I accept the Minecraft EULA").on_toggle(Message::NewServerEula),
                 row![
@@ -1240,7 +1324,7 @@ impl App {
                 .align_y(Alignment::Center),
             ]
             .spacing(6),
-            text("It runs in offline mode so offline accounts can join. Friends still need your OK when they connect with a code, and you can turn on a whitelist in its settings.")
+            text("Offline accounts can join (with skins, through netherNode). Friends need your OK when they connect with a code (friends on your list get in straight away), and you can turn on a whitelist in its settings.")
                 .size(12)
                 .color(theme::MUTED),
         ]
@@ -1248,19 +1332,195 @@ impl App {
         .into()
     }
 
-    /// Banners for an active share (host) and a joined friend's world. Shown on every
-    /// screen, since join requests need an answer wherever the player is.
+    /// "Friends" plus how many are online.
+    fn friends_label(&self) -> String {
+        let online = self
+            .friends
+            .as_ref()
+            .map_or(0, |f| f.list().iter().filter(|(_, p)| p.online).count());
+        if online > 0 {
+            format!("Friends ● {online}")
+        } else {
+            "Friends".into()
+        }
+    }
+
+    fn friends_screen<'a>(&'a self, view: &'a FriendsView) -> Element<'a, Message> {
+        let header = row![
+            text("Friends").size(26).font(BOLD).width(Length::Fill),
+            small_button("Done").on_press(Message::ShowHome),
+        ]
+        .align_y(Alignment::Center);
+        let Some(friends) = &self.friends else {
+            return column![
+                header,
+                text("Friends need an internet connection. netherNode keeps trying in the background.")
+                    .color(theme::MUTED),
+            ]
+            .spacing(16)
+            .into();
+        };
+        let intro = text(
+            "Friends see when you're online and can join what you share (a world opened to LAN, or a server) with one click, without codes or Allow prompts.",
+        )
+        .size(13)
+        .color(theme::MUTED);
+
+        let my_code: Element<'a, Message> = match &view.my_code {
+            Some(code) => row![
+                column![
+                    text("Your friend code (works for about an hour):").size(13),
+                    text(code).size(20).font(BOLD).color(theme::VIOLET_BRIGHT),
+                ]
+                .spacing(4)
+                .width(Length::Fill),
+                small_button("Copy").on_press(Message::CopyText(code.clone())),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            None => row![
+                text("Give a friend your four-word friend code so they can add you.")
+                    .size(13)
+                    .width(Length::Fill),
+                small_button(if view.busy {
+                    "Working…"
+                } else {
+                    "Show my friend code"
+                })
+                .on_press_maybe((!view.busy).then_some(Message::MakeFriendCode)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        };
+        let can_add = !view.code.trim().is_empty() && !view.busy;
+        let add = row![
+            text_input(
+                "Their friend code, e.g. maple orbit tunnel frog",
+                &view.code
+            )
+            .on_input(Message::FriendCodeInput)
+            .on_submit_maybe(can_add.then_some(Message::AddFriend))
+            .style(theme::input)
+            .padding(10),
+            button(text("Add friend").font(BOLD))
+                .padding([10, 18])
+                .style(theme::play)
+                .on_press_maybe(can_add.then_some(Message::AddFriend)),
+        ]
+        .spacing(10);
+
+        let mut list = column![].spacing(8);
+        let mut entries = friends.list();
+        entries.sort_by_key(|(f, p)| (!p.online, f.name.to_lowercase()));
+        if entries.is_empty() {
+            list = list.push(text("No friends yet.").size(13).color(theme::MUTED));
+        }
+        for (friend, presence) in entries {
+            let (dot, state) = if !friend.confirmed {
+                (theme::MUTED, "waiting for them to accept")
+            } else if presence.online {
+                (theme::SUCCESS, "online")
+            } else {
+                (theme::MUTED, "offline")
+            };
+            let mut col = column![
+                row![
+                    text("●").size(14).color(dot),
+                    text(clip(&friend.name, 24)).size(16).font(BOLD),
+                    text(state).size(12).color(theme::MUTED),
+                    space::horizontal(),
+                    small_button("Remove").on_press(Message::RemoveFriend(friend.id.clone())),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+            ]
+            .spacing(6);
+            for shared in &presence.sharing {
+                col = col.push(
+                    row![
+                        text(format!(
+                            "{} {} · {}",
+                            if shared.server { "Server" } else { "World" },
+                            clip(&shared.title, 24),
+                            shared.summary
+                        ))
+                        .size(13)
+                        .width(Length::Fill),
+                        button(text("Join").size(14).font(BOLD))
+                            .padding([6, 16])
+                            .style(theme::play)
+                            .on_press(Message::JoinShared(shared.code.clone())),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+            list = list.push(container(col).padding(12).style(theme::row_item));
+        }
+        column![
+            header,
+            intro,
+            my_code,
+            field("Add a friend", add),
+            text("Your friends").size(13).color(theme::MUTED),
+            list,
+        ]
+        .spacing(18)
+        .into()
+    }
+
+    /// Banners for active shares (host), friend requests and a joined friend's world. Shown
+    /// on every screen, since requests need an answer wherever the player is.
     fn share_banners(&self) -> Vec<Element<'_, Message>> {
         let mut banners = Vec::new();
-        if let Some(share) = &self.host_share {
+        for request in self
+            .friends
+            .as_ref()
+            .map(|f| f.requests())
+            .unwrap_or_default()
+        {
+            banners.push(
+                container(
+                    row![
+                        text(format!(
+                            "{} wants to be your friend.",
+                            clip(&request.name, 24)
+                        ))
+                        .size(14)
+                        .width(Length::Fill),
+                        button(text("Accept").size(14).font(BOLD))
+                            .padding([6, 16])
+                            .style(theme::play)
+                            .on_press(Message::AcceptFriend(request.id.clone())),
+                        button(text("Decline").size(14))
+                            .padding([6, 14])
+                            .style(theme::danger_button)
+                            .on_press(Message::DeclineFriend(request.id.clone())),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding([10, 16])
+                .style(theme::glass_dense)
+                .into(),
+            );
+        }
+        for share in &self.shares {
+            let key = crate::share_key(share.is_server, &share.instance);
             let mut col = column![].spacing(10);
             let head: Element<'_, Message> = match &share.code {
-                None => text(format!("Getting {} ready to share…", share.instance)).into(),
+                None => text(format!(
+                    "Getting {} ready to share…",
+                    clip(&share.instance, 30)
+                ))
+                .into(),
                 Some(code) => row![
                     column![
                         text(format!(
                             "Sharing {} with friends. Send them this code:",
-                            share.instance
+                            clip(&share.instance, 30)
                         ))
                         .size(13),
                         text(code).size(18).font(BOLD).color(theme::VIOLET_BRIGHT),
@@ -1279,7 +1539,7 @@ impl App {
                     button(text("Stop sharing").size(14))
                         .padding([8, 14])
                         .style(theme::danger_button)
-                        .on_press(Message::StopSharing),
+                        .on_press(Message::StopSharing(key.clone())),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -1298,11 +1558,11 @@ impl App {
                             button(text("Allow").size(14).font(BOLD))
                                 .padding([6, 16])
                                 .style(theme::play)
-                                .on_press(Message::AnswerJoin(i, true)),
+                                .on_press(Message::AnswerJoin(key.clone(), i, true)),
                             button(text("Deny").size(14))
                                 .padding([6, 14])
                                 .style(theme::danger_button)
-                                .on_press(Message::AnswerJoin(i, false)),
+                                .on_press(Message::AnswerJoin(key.clone(), i, false)),
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center),
@@ -1332,12 +1592,30 @@ impl App {
                 JoinEvent::WaitingForApproval => {
                     ("Waiting for your friend to let you in…".to_string(), None)
                 }
-                JoinEvent::Ready { port } => (
+                JoinEvent::Ready {
+                    port,
+                    title,
+                    blocked,
+                } => (
                     format!(
-                        "Connected! In Minecraft: Multiplayer → the world is under LAN, or Direct Connect to localhost:{port}"
+                        "Connected to {}! In Minecraft: Multiplayer → it's under LAN, or Direct Connect to localhost:{port}{}",
+                        clip(title, 30),
+                        if blocked.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                ". Couldn't open {} here (another program uses it)",
+                                blocked
+                                    .iter()
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        }
                     ),
                     Some(*port),
                 ),
+                JoinEvent::Mods(..) => (String::new(), None),
             };
             let mut row = row![text(msg).size(13).width(Length::Fill)]
                 .spacing(8)
@@ -1354,8 +1632,48 @@ impl App {
                     .style(theme::danger_button)
                     .on_press(Message::LeaveFriend),
             );
+            let mut col = column![row].spacing(10);
+            // A modded world: offer the same mods, or the instance that has them.
+            if let Some((manifest, _)) = &session.mods {
+                let mods_row = match &session.matching {
+                    Some(instance) if self.jobs.contains_key(instance) => row![
+                        text(format!(
+                            "Getting your friend's mods into {}…",
+                            clip(instance, 24)
+                        ))
+                        .size(13)
+                        .width(Length::Fill),
+                    ],
+                    Some(instance) => row![
+                        text(format!(
+                            "Your friend plays with mods ({}). {} has them.",
+                            manifest.summary(),
+                            clip(instance, 24)
+                        ))
+                        .size(13)
+                        .width(Length::Fill),
+                        button(text("▶  Play it").size(14).font(BOLD))
+                            .padding([8, 16])
+                            .style(theme::play)
+                            .on_press(Message::PlayOnFriend(instance.clone())),
+                    ],
+                    None => row![
+                        text(format!(
+                            "Your friend plays with mods ({}). You need the same ones to join.",
+                            manifest.summary()
+                        ))
+                        .size(13)
+                        .width(Length::Fill),
+                        button(text("Get the same mods").size(14).font(BOLD))
+                            .padding([8, 16])
+                            .style(theme::play)
+                            .on_press(Message::GetFriendMods),
+                    ],
+                };
+                col = col.push(mods_row.spacing(8).align_y(Alignment::Center));
+            }
             banners.push(
-                container(row)
+                container(col)
                     .padding([12, 16])
                     .style(theme::glass_dense)
                     .into(),
@@ -1608,8 +1926,10 @@ impl App {
         }
         column![
             row![
-                text(format!("Edit {}", form.original)).size(26).font(BOLD),
-                space::horizontal(),
+                text(format!("Edit {}", clip(&form.original, 22)))
+                    .size(26)
+                    .font(BOLD)
+                    .width(Length::Fill),
                 small_button("Cancel").on_press(Message::ShowHome),
                 button(text("Save").size(15).font(BOLD))
                     .padding([10, 26])
@@ -1618,6 +1938,13 @@ impl App {
             ]
             .spacing(10)
             .align_y(Alignment::Center),
+            field(
+                "Name",
+                text_input("Instance name", &form.name)
+                    .on_input(Message::EditName)
+                    .style(theme::input)
+                    .padding(10),
+            ),
             self.loader_picker(&form.loader, minecraft),
             self.window_section(form),
             self.edit_worlds_section(form),
@@ -2291,8 +2618,57 @@ fn server_settings<'a>(form: &'a crate::ServerSettingsForm, running: bool) -> El
         checkbox(form.whitelist_on)
             .label("Only allow these players (whitelist)")
             .on_toggle(|on| Message::ServerSettingsToggle(ServerField::WhitelistOn, on)),
+        column![
+            checkbox(form.skins)
+                .label("Show players' skins")
+                .on_toggle(|on| Message::ServerSettingsToggle(ServerField::Skins, on)),
+            text("Players then need netherNode (with skins on) to join. Turn off to let any offline launcher in.")
+                .size(12)
+                .color(theme::MUTED),
+        ]
+        .spacing(4),
+        input(
+            "Extra ports for friends (mods like voice chat; Simple Voice Chat is found automatically)",
+            &form.extra_ports,
+            ServerField::ExtraPorts,
+            "e.g. UDP 24454, TCP 8100"
+        ),
     ]
     .spacing(12);
+    col = col.push(
+        button(
+            text(if form.show_all {
+                "▾ All settings (server.properties)"
+            } else {
+                "▸ All settings (server.properties)"
+            })
+            .size(13),
+        )
+        .style(theme::link)
+        .on_press(Message::ToggleAllServerSettings),
+    );
+    if form.show_all {
+        let mut all = column![].spacing(6);
+        for (i, (key, value)) in form.all.iter().enumerate() {
+            all = all.push(
+                row![
+                    text(key.as_str())
+                        .size(12)
+                        .font(MONO)
+                        .width(Length::FillPortion(2)),
+                    text_input("", value)
+                        .on_input(move |v| Message::ServerPropertyInput(i, v))
+                        .style(theme::input)
+                        .size(13)
+                        .padding(6)
+                        .width(Length::FillPortion(3)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(all);
+    }
     if form.whitelist_on {
         col = col.push(input(
             "Allowed names (comma separated)",

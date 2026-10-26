@@ -1,0 +1,32 @@
+JVM info: Microsoft - 21.0.7 - 21.0.7+6-LTS
+java.net.preferIPv4Stack=true
+Current Time: 26/10/2026 14:51:06
+Option                                  Description                           
+------                                  -----------                           
+--debug                                 Run in debug mode -- don't delete any 
+                                          files                               
+--fat, --fat-installer, --generate-fat  Generate a fat installer jar (default:
+  [File]                                  /home/techpsychotic/netherNode/.    
+                                          testdata/cache/installers/neoforge- 
+                                          21.1.264-installer-fat.jar)         
+--fat-include-installer-libs            Include the installer libraries in the
+                                          fat installer                       
+--fat-include-minecraft                 Include the Minecraft client / server 
+                                          jar in the fat installer            
+--fat-include-minecraft-libs            Include the Minecraft libraries in the
+                                          fat installer                       
+--fat-offline, --gen-offline, --        Generate an online fat installer      
+  generate-offline, --gf                                                      
+-h, --help                              Help with this installer              
+--install-client, --installClient       Install a client to the specified     
+  [File]                                  directory, defaulting to the MC     
+                                          installation directory (default:    
+                                          /home/techpsychotic/.minecraft)     
+--install-server, --installServer       Install a server to the current       
+  [File]                                  directory (default: .)              
+--mirror <URL>                          Use a specific mirror URL             
+--offline                               Don't attempt any network calls       
+--server-jar, --server-starter, --      Download the server starter jar for   
+  server.jar                              arg-free executable launches        
+--skip-hash-check                       Skips the hash check when verifying   
+                                          outputs                             

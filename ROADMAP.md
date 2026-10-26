@@ -33,6 +33,16 @@ Short codes: the host gets four everyday words (for example `maple-orbit-tunnel-
 
 **Next:** self-hosted relay option (for example a small server in India) to cut relay latency; show "direct" vs "relay" in the banner.
 
+## Friends, modded multiplayer, servers (1.2)
+
+- **Friends:** each install has a lasting identity (`identity.key`); friends add each other with a four-word friend code published on iroh's lookup service. Their netherNodes check on each other every 20 s over iroh (ALPN `nethernode/friends/1`), sharing what each is hosting; friends join without codes or approval. Verified between two data folders on one PC.
+- **Tunnel v3:** extra TCP ports, UDP over QUIC datagrams (the game port's UDP plus extra ports, e.g. Simple Voice Chat), and the host's mod list. Verified with echo servers.
+- **Mod sync:** the host's loader and mods (SHA-1 each); the joiner gets Modrinth files from Modrinth and the rest from the host over the tunnel, every file checked. Verified with 6 mods, one not on Modrinth.
+- **Servers:** Forge/NeoForge via the official installer (`--installServer`), finished with netherNode's processor runner when a checksum is too strict (Fedora's zlib-ng); from an instance with client-only mods left out (Modrinth `server_side` and `fabric.mod.json` `environment`); skins via online mode against the local skin service; added to every matching instance's `servers.dat`. Verified: Forge 1.20.1 server from an instance, client joined with skins.
+- **Windows long command lines:** Java 9+ get an argument file, Java 8 the classpath in `CLASSPATH`. Verified on NeoForge 1.21.1 and Forge 1.12.2.
+
+**Next:** see what fails on Windows with specific mods (needs the crash report); Quilt servers; server mod updates.
+
 ## Skins (done)
 
 Custom skins and capes per account (Accounts screen or `nethernode account skin`). A local skin service plus authlib-injector (open source, downloaded at a pinned version and checked by SHA-256, never bundled) shows them in game, and Invite friends exchanges skins between friends. Nothing logs in anywhere. Verified: the game loads the signed profile, LAN-style logins pass through the local `hasJoined`, and a real client downloaded its custom skin in a world.

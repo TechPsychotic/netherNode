@@ -60,6 +60,9 @@ enum Command {
     /// Play a LAN world with friends over the internet (no port forwarding)
     #[command(subcommand)]
     Share(ShareCmd),
+    /// Permanent friends: see who's online and join what they share
+    #[command(subcommand)]
+    Friends(FriendsCmd),
     /// Run the local skin service until Ctrl+C (for troubleshooting skins)
     #[command(hide = true)]
     SkinService,
@@ -210,12 +213,17 @@ enum ModsCmd {
 
 #[derive(Subcommand)]
 enum ServerCmd {
-    /// Create (and download) a server: vanilla, fabric or paper
+    /// Create (and download) a server: vanilla, fabric, forge, neoforge or paper
     Create {
         name: String,
+        /// Minecraft version (ignored with --from-instance)
+        #[arg(default_value = "latest")]
         minecraft: String,
         #[arg(long, default_value = "vanilla")]
         kind: String,
+        /// Same version, loader and mods as this instance (client-only mods are left out)
+        #[arg(long)]
+        from_instance: Option<String>,
         /// You accept the Minecraft EULA (https://aka.ms/MinecraftEULA); required to start it
         #[arg(long)]
         accept_eula: bool,
@@ -243,6 +251,15 @@ enum ShareCmd {
         /// Let everyone with the code in without asking
         #[arg(long)]
         yes: bool,
+        /// Also forward this UDP port (e.g. a voice chat mod's); repeatable
+        #[arg(long)]
+        udp: Vec<u16>,
+        /// Also forward this TCP port; repeatable
+        #[arg(long)]
+        tcp: Vec<u16>,
+        /// Offer friends this instance's mods
+        #[arg(long)]
+        mods_from: Option<String>,
     },
     /// Join a friend's world with their code
     Join {
@@ -252,7 +269,34 @@ enum ShareCmd {
         /// Name shown in Minecraft's LAN list
         #[arg(long, default_value = "Friend's world (netherNode)")]
         name: String,
+        /// If the host plays with mods, make an instance with the same mods under this name
+        #[arg(long)]
+        get_mods: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum FriendsCmd {
+    /// Your friends and requests (as last saved)
+    List,
+    /// Stay online for friends until Ctrl+C, printing who's online and what they share
+    Run {
+        /// Print a four-word friend code others can add you with
+        #[arg(long)]
+        code: bool,
+        /// Accept every friend request (for testing)
+        #[arg(long)]
+        accept_all: bool,
+    },
+    /// Add a friend by their four-word friend code
+    Add {
+        #[arg(required = true, num_args = 1..)]
+        code: Vec<String>,
+    },
+    /// Accept a friend request
+    Accept { id: String },
+    /// Remove a friend
+    Remove { id: String },
 }
 
 #[derive(Subcommand)]
@@ -627,22 +671,44 @@ async fn main() -> Result<()> {
                     name,
                     minecraft,
                     kind,
+                    from_instance,
                     accept_eula,
                 } => {
-                    let kind = ServerKind::ALL
-                        .into_iter()
-                        .find(|k| k.name().eq_ignore_ascii_case(&kind))
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("unknown kind '{kind}' (vanilla, fabric, paper)")
-                        })?;
-                    let minecraft = resolve_version_alias(&paths, &minecraft).await?;
-                    let mut created = Server::create(&paths, &name, &minecraft, kind)?;
+                    let source = from_instance
+                        .as_deref()
+                        .map(|i| Instance::load(&paths, i))
+                        .transpose()?;
+                    let mut created = match &source {
+                        Some(instance) => Server::create_from_instance(&paths, &name, instance)?,
+                        None => {
+                            let kind = ServerKind::ALL
+                                .into_iter()
+                                .find(|k| k.name().eq_ignore_ascii_case(&kind))
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "unknown kind '{kind}' (vanilla, fabric, forge, neoforge, paper)"
+                                    )
+                                })?;
+                            let minecraft = resolve_version_alias(&paths, &minecraft).await?;
+                            Server::create(&paths, &name, &minecraft, kind)?
+                        }
+                    };
+                    let kind = created.kind;
+                    let minecraft = created.minecraft.clone();
                     if let Err(e) =
                         server::install(&http, &paths, &mut created, &progress_bars()).await
                     {
                         let _ = Server::delete(&paths, &name);
                         return Err(e.into());
                     }
+                    if let Some(instance) = &source {
+                        let skipped =
+                            server::copy_instance_mods(&http, &paths, &created, instance).await?;
+                        if !skipped.is_empty() {
+                            println!("left out client-only mods: {}", skipped.join(", "));
+                        }
+                    }
+                    created.add_to_multiplayer_lists(&paths);
                     if accept_eula {
                         server::accept_eula(&paths, &created)?;
                     }
@@ -693,20 +759,26 @@ async fn main() -> Result<()> {
                             }
                         }
                     });
-                    let port = srv.port;
+                    srv.add_to_multiplayer_lists(&paths);
+                    let options = share::HostOptions {
+                        lan_port: srv.port,
+                        title: srv.name.clone(),
+                        extra_ports: srv.ports_for_friends(&paths),
+                        manifest: server::friend_manifest(&http, &paths, &srv).await,
+                        skins: nethernode_core::skins::for_sharing(&paths),
+                    };
                     let sharing = async move {
                         if !share {
                             return std::future::pending::<()>().await;
                         }
                         let result = share::host(
-                            port,
-                            nethernode_core::skins::for_sharing(&paths),
+                            options,
                             |event| match event {
                                 share::HostEvent::Ready { code, short } => match short {
                                     Some(short) => println!("\nfriends can join with this code:\n  {short}\n(or the full code: {code})\n"),
                                     None => println!("\nfriends can join with this code:\n  {code}\n"),
                                 },
-                                share::HostEvent::Request { friend, reply } => {
+                                share::HostEvent::Request { friend, reply, .. } => {
                                     println!("{friend} wants to join; letting them in (CLI)");
                                     let _ = reply.send(true);
                                 }
@@ -746,19 +818,57 @@ async fn main() -> Result<()> {
             }
         }
         Command::Share(cmd) => match cmd {
-            ShareCmd::Host { port, yes } => {
+            ShareCmd::Host {
+                port,
+                yes,
+                udp,
+                tcp,
+                mods_from,
+            } => {
+                let http = download::client();
                 let stop = async {
                     let _ = shutdown_signal().await;
                 };
+                let mut extra_ports: Vec<share::ExtraPort> = udp
+                    .iter()
+                    .map(|&port| share::ExtraPort { udp: true, port })
+                    .chain(
+                        tcp.iter()
+                            .map(|&port| share::ExtraPort { udp: false, port }),
+                    )
+                    .collect();
+                let mut manifest = None;
+                if let Some(name) = &mods_from {
+                    let instance = Instance::load(&paths, name)?;
+                    for p in share::detect_mod_ports(&instance.game_dir(&paths), port) {
+                        if !extra_ports.contains(&p) {
+                            extra_ports.push(p);
+                        }
+                    }
+                    let built = nethernode_core::modsync::build(
+                        &http,
+                        instance.minecraft_version(),
+                        instance.loader.as_ref(),
+                        &instance.mods_dir(&paths),
+                    )
+                    .await?;
+                    manifest = Some((built, instance.mods_dir(&paths)));
+                }
+                let options = share::HostOptions {
+                    lan_port: port,
+                    title: mods_from.clone().unwrap_or_else(|| "Shared world".into()),
+                    extra_ports,
+                    manifest,
+                    skins: nethernode_core::skins::for_sharing(&paths),
+                };
                 share::host(
-                    port,
-                    nethernode_core::skins::for_sharing(&paths),
+                    options,
                     move |event| match event {
                         share::HostEvent::Ready { code, short } => match short {
                             Some(short) => println!("Sharing localhost:{port}. Give your friend this code:\n\n  {short}\n\n(or the full code: {code})"),
                             None => println!("Sharing localhost:{port}. Give your friend this code:\n\n  {code}\n"),
                         },
-                        share::HostEvent::Request { friend, reply } => {
+                        share::HostEvent::Request { friend, reply, .. } => {
                             let allow = yes || {
                                 println!("{friend} wants to join. Allow? [y/N]");
                                 let mut line = String::new();
@@ -773,27 +883,162 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
-            ShareCmd::Join { code, name } => {
+            ShareCmd::Join {
+                code,
+                name,
+                get_mods,
+            } => {
                 let code = nethernode_core::invite::resolve(&code.join(" ")).await?;
                 let stop = async {
                     let _ = shutdown_signal().await;
                 };
+                let paths2 = paths.clone();
                 share::join(
                     &code,
                     &name,
                     nethernode_core::skins::for_sharing(&paths),
-                    |event| match event {
+                    None,
+                    move |event| match event {
                         share::JoinEvent::Connecting => println!("connecting…"),
                         share::JoinEvent::WaitingForApproval => println!("waiting for your friend to allow you in…"),
-                        share::JoinEvent::Ready { port } => println!(
-                            "connected! In Minecraft: Multiplayer, the world shows under LAN, or Direct Connect to localhost:{port}"
-                        ),
+                        share::JoinEvent::Ready { port, title, blocked } => {
+                            println!(
+                                "connected to {title}! In Minecraft: Multiplayer, the world shows under LAN, or Direct Connect to localhost:{port}"
+                            );
+                            for p in blocked {
+                                println!("couldn't open {p} here (another program uses it)");
+                            }
+                        }
+                        share::JoinEvent::Mods(manifest, source) => {
+                            println!("your friend plays with mods: {}", manifest.summary());
+                            if let Some(found) = nethernode_core::modsync::find_matching(&paths2, &manifest) {
+                                println!("instance '{}' already has them", found.name);
+                                return;
+                            }
+                            let Some(target) = get_mods.clone() else {
+                                println!("re-run with --get-mods <new instance name> to get the same mods");
+                                return;
+                            };
+                            let paths = paths2.clone();
+                            tokio::spawn(async move {
+                                let http = download::client();
+                                let fetch = |sha1: String| {
+                                    let source = source.clone();
+                                    async move { source.fetch(sha1).await }
+                                };
+                                match nethernode_core::modsync::create_instance(
+                                    &http, &paths, &manifest, &target, fetch, &progress_bars(),
+                                )
+                                .await
+                                {
+                                    Ok(i) => println!("instance '{}' is ready with the same mods", i.name),
+                                    Err(e) => eprintln!("couldn't get the mods: {e}"),
+                                }
+                            });
+                        }
                     },
                     stop,
                 )
                 .await?;
             }
         },
+
+        Command::Friends(cmd) => {
+            use nethernode_core::friends::Friends;
+            let me = Accounts::load(&paths)?
+                .default
+                .unwrap_or_else(|| "Player".into());
+            match cmd {
+                FriendsCmd::List => {
+                    let friends = Friends::start(&paths, &me, || {}).await?;
+                    println!("your friend id: {}", friends.id());
+                    for (f, _) in friends.list() {
+                        let state = if f.confirmed {
+                            ""
+                        } else {
+                            " (waiting for them to accept)"
+                        };
+                        println!("{:<20} {}{state}", f.name, f.id);
+                    }
+                    for r in friends.requests() {
+                        println!(
+                            "request from {} ({}): accept with `nethernode friends accept {}`",
+                            r.name, r.id, r.id
+                        );
+                    }
+                    friends.shutdown().await;
+                }
+                FriendsCmd::Add { code } => {
+                    let friends = Friends::start(&paths, &me, || {}).await?;
+                    let added = friends.add(&code.join(" ")).await?;
+                    println!("sent a friend request to {} ({})", added.name, added.id);
+                    friends.shutdown().await;
+                }
+                FriendsCmd::Accept { id } => {
+                    let friends = Friends::start(&paths, &me, || {}).await?;
+                    friends.accept(&id).await?;
+                    println!("accepted");
+                    friends.shutdown().await;
+                }
+                FriendsCmd::Remove { id } => {
+                    let friends = Friends::start(&paths, &me, || {}).await?;
+                    friends.remove(&id).await;
+                    println!("removed");
+                    friends.shutdown().await;
+                }
+                FriendsCmd::Run { code, accept_all } => {
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                    let friends = Friends::start(&paths, &me, move || {
+                        let _ = tx.send(());
+                    })
+                    .await?;
+                    println!("online as {me} ({})", friends.id());
+                    if code {
+                        println!("friend code: {}", friends.friend_code().await?);
+                    }
+                    let mut last = String::new();
+                    loop {
+                        tokio::select! {
+                            _ = rx.recv() => {}
+                            _ = shutdown_signal() => break,
+                        }
+                        if accept_all {
+                            for r in friends.requests() {
+                                let _ = friends.accept(&r.id).await;
+                            }
+                        }
+                        let now = friends
+                            .list()
+                            .iter()
+                            .map(|(f, p)| {
+                                let sharing: Vec<String> = p
+                                    .sharing
+                                    .iter()
+                                    .map(|s| format!("{} [{}]", s.title, s.code))
+                                    .collect();
+                                format!(
+                                    "{} {}{}{}",
+                                    f.name,
+                                    if p.online { "online" } else { "offline" },
+                                    if f.confirmed { "" } else { " (waiting)" },
+                                    if sharing.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" sharing {}", sharing.join(", "))
+                                    }
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if now != last {
+                            println!("--\n{now}");
+                            last = now;
+                        }
+                    }
+                    friends.shutdown().await;
+                }
+            }
+        }
 
         Command::Launch {
             instance,

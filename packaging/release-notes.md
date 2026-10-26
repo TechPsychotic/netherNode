@@ -1,4 +1,4 @@
-**netherNode 1.1.2**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
+**netherNode 1.2**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
 
 ## Downloads
 
@@ -13,6 +13,18 @@
 - **Windows:** unzip, run `nethernode-gui.exe`. If SmartScreen appears: *More info → Run anyway*.
 - **macOS:** open the `.dmg`, drag netherNode to Applications, then right-click it → *Open* → *Open* (first time only). If macOS says it's damaged: `xattr -dr com.apple.quarantine /Applications/netherNode.app`.
 - **Linux:** extract, then run `./install.sh` (adds it to the app menu) or `./nethernode-gui` directly.
+
+## New in 1.2
+
+- **Friends list:** add friends once with a four-word friend code, see who's online and what they're sharing, and join with one click (no codes or Allow prompts).
+- **Modded multiplayer:** joining a modded world or server offers *Get the same mods* (same loader and mods, from Modrinth or straight from the host).
+- **Servers:** Forge and NeoForge servers; make a server from an instance (client-only mods are left out); run several at once, each with its own code; every `server.properties` setting; skins on servers.
+- **Your servers are in Minecraft's Multiplayer list** ("*name* (this PC)"), replacing *Play on it*.
+- **Voice chat and other mod ports:** UDP and extra ports go through the tunnel; Simple Voice Chat is found automatically.
+- **Windows:** big modpacks no longer fail with "The filename or extension is too long".
+- **Instances:** rename in Edit (names stay unique); long names no longer push buttons off screen.
+- A **Home** button, and the instance's version now sits beside its dropdown.
+- Everyone playing together needs 1.2: it can't connect to 1.1.
 
 ## Fixed in 1.1.2
 
@@ -47,6 +59,11 @@
 
 ## Please check when testing
 
+- Friends: add each other with friend codes; check online status and *Join* on something the other shares.
+- Join a modded world: *Get the same mods*, then *Play it*.
+- A Forge or NeoForge server made from an instance; two servers running at once with Invite friends on both.
+- Simple Voice Chat between two PCs through Invite friends.
+- A big modpack on Windows (the one that failed before).
 - Skins: choose one under Accounts, play, and check it shows in third person (F5) — and that a friend who joins your LAN world sees it.
 - Invite friends with the four words: the friend types them in Join friend.
 - Windows: all text is readable and nothing turns dark.

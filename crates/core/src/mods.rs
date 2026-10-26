@@ -403,6 +403,76 @@ pub async fn install_preset(
     Ok((installed, skipped))
 }
 
+/// A mod file Modrinth knows, found by its SHA-1.
+#[derive(Debug, Clone)]
+pub(crate) struct KnownFile {
+    pub url: String,
+    pub project_id: String,
+}
+
+/// Look up files on Modrinth by SHA-1. Unknown hashes are simply missing from the result.
+pub(crate) async fn known_files(
+    http: &reqwest::Client,
+    hashes: &[String],
+) -> Result<std::collections::HashMap<String, KnownFile>> {
+    if hashes.is_empty() {
+        return Ok(Default::default());
+    }
+    let body = serde_json::json!({ "hashes": hashes, "algorithm": "sha1" });
+    let found: std::collections::HashMap<String, Version> = http
+        .post(format!("{MODRINTH}/version_files"))
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(found
+        .into_iter()
+        .filter_map(|(hash, version)| {
+            let file = version
+                .files
+                .iter()
+                .find(|f| f.hashes.get("sha1") == Some(&hash))?;
+            let known = KnownFile {
+                url: file.url.clone(),
+                project_id: version.project_id.clone(),
+            };
+            Some((hash, known))
+        })
+        .collect())
+}
+
+/// Projects Modrinth marks as not running on servers (`server_side: unsupported`), such as
+/// Sodium or Iris. Copying them to a dedicated server would crash it.
+pub(crate) async fn client_only_projects(
+    http: &reqwest::Client,
+    ids: &[String],
+) -> Result<HashSet<String>> {
+    #[derive(Deserialize)]
+    struct Sides {
+        id: String,
+        #[serde(default)]
+        server_side: String,
+    }
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let projects: Vec<Sides> = http
+        .get(format!("{MODRINTH}/projects"))
+        .query(&[("ids", serde_json::to_string(ids)?)])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(projects
+        .into_iter()
+        .filter(|p| p.server_side == "unsupported")
+        .map(|p| p.id)
+        .collect())
+}
+
 /// Look up unidentified jars (added by hand or by a modpack) on Modrinth by their SHA-1,
 /// so the list shows real names. Returns how many were identified.
 pub async fn identify(http: &reqwest::Client, paths: &Paths, instance: &Instance) -> Result<usize> {

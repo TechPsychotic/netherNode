@@ -159,6 +159,71 @@ fn artifact_path(paths: &Paths, coordinate: &str) -> Result<PathBuf> {
     Ok(paths.libraries().join(rel))
 }
 
+/// Finish a server install the official installer gave up on: it stops when a patched file's
+/// checksum differs, which happens with some zlib builds (see the module docs) although the
+/// file is fine. Re-run the server-side processors in `server_dir` with our own runner.
+pub(crate) async fn finish_server_install(
+    server_dir: &Path,
+    installer: &Path,
+    java: &Path,
+    mc: &str,
+    progress: &ProgressFn,
+) -> Result<()> {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(installer)?)?;
+    let profile: Value = serde_json::from_slice(&read_entry(&mut zip, "install_profile.json")?)?;
+    // A Paths rooted at the server: its `libraries/` is the server's.
+    let paths = Paths::new(server_dir);
+    let server_jar = profile["serverJarPath"]
+        .as_str()
+        .map(|p| {
+            p.replace("{LIBRARY_DIR}", &paths.libraries().to_string_lossy())
+                .replace("{MINECRAFT_VERSION}", mc)
+        })
+        .map(PathBuf::from)
+        .unwrap_or_else(|| server_dir.join(format!("minecraft_server.{mc}.jar")));
+    if !server_jar.exists() {
+        return Err(other("the installer didn't download the Minecraft server"));
+    }
+    let work = server_dir.join(".forge-work");
+    let result = run_processors(
+        &paths, mc, installer, &mut zip, &profile, java, &work, progress, "server", server_jar,
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// The official installer jar (downloaded once), e.g. for installing a server with it.
+pub(crate) async fn installer(
+    http: &reqwest::Client,
+    paths: &Paths,
+    kind: LoaderKind,
+    mc: &str,
+    version: &str,
+    progress: &ProgressFn,
+) -> Result<PathBuf> {
+    let (url, name) = installer_url(kind, mc, version);
+    let installer = paths.root.join("cache").join("installers").join(name);
+    if !installer.exists() {
+        progress(Progress::Stage {
+            name: format!("{kind} installer"),
+            total: 1,
+        });
+        download::fetch(
+            http,
+            &Download {
+                url,
+                dest: installer.clone(),
+                sha1: None,
+                size: None,
+            },
+        )
+        .await?;
+        progress(Progress::Advance);
+    }
+    Ok(installer)
+}
+
 pub async fn install(
     http: &reqwest::Client,
     paths: &Paths,
@@ -262,7 +327,16 @@ pub async fn install(
         .java;
     let work = paths.root.join("cache").join("forge-work").join(&id);
     run_processors(
-        paths, mc, &installer, &mut zip, &profile, &java, &work, progress,
+        paths,
+        mc,
+        &installer,
+        &mut zip,
+        &profile,
+        &java,
+        &work,
+        progress,
+        "client",
+        paths.version_jar(mc),
     )
     .await?;
     let _ = std::fs::remove_dir_all(&work);
@@ -374,16 +448,14 @@ async fn run_processors(
     java: &Path,
     work: &Path,
     progress: &ProgressFn,
+    side: &str,
+    minecraft_jar: PathBuf,
 ) -> Result<()> {
     let processors: Vec<Processor> =
         serde_json::from_value(profile["processors"].clone()).unwrap_or_default();
     let processors: Vec<Processor> = processors
         .into_iter()
-        .filter(|p| {
-            p.sides
-                .as_ref()
-                .is_none_or(|s| s.iter().any(|s| s == "client"))
-        })
+        .filter(|p| p.sides.as_ref().is_none_or(|s| s.iter().any(|s| s == side)))
         .collect();
     if processors.is_empty() {
         return Ok(());
@@ -391,8 +463,8 @@ async fn run_processors(
 
     let path_str = |p: PathBuf| p.to_string_lossy().into_owned();
     let mut data: HashMap<String, String> = HashMap::from([
-        ("SIDE".into(), "client".into()),
-        ("MINECRAFT_JAR".into(), path_str(paths.version_jar(mc))),
+        ("SIDE".into(), side.into()),
+        ("MINECRAFT_JAR".into(), path_str(minecraft_jar)),
         ("MINECRAFT_VERSION".into(), mc.into()),
         ("ROOT".into(), path_str(paths.root.clone())),
         ("INSTALLER".into(), path_str(installer.to_path_buf())),
@@ -400,7 +472,7 @@ async fn run_processors(
     ]);
     if let Some(entries) = profile["data"].as_object() {
         for (key, sides) in entries {
-            let Some(value) = sides["client"].as_str() else {
+            let Some(value) = sides[side].as_str() else {
                 continue;
             };
             let resolved = if let Some(coordinate) =

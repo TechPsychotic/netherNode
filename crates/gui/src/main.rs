@@ -135,7 +135,10 @@ pub struct App {
     refreshing_versions: bool,
     /// Modpack installs in progress, by Modrinth project id or file path.
     pack_jobs: HashMap<String, Job>,
-    host_share: Option<HostShare>,
+    /// Worlds and servers shared with friends right now (each has its own code).
+    shares: Vec<HostShare>,
+    /// Permanent friends, once the service has started.
+    friends: Option<nethernode_core::friends::Friends>,
     servers: Vec<nethernode_core::server::Server>,
     server_runs: HashMap<String, ServerRun>,
     /// Server downloads in progress, by server name.
@@ -147,6 +150,11 @@ pub struct App {
     loader_support: HashMap<String, HashMap<LoaderKind, Load<bool>>>,
 }
 
+/// Identifies a share: shares of an instance and of a server may have the same name.
+pub fn share_key(is_server: bool, name: &str) -> String {
+    format!("{}:{name}", if is_server { "server" } else { "world" })
+}
+
 /// A launch in progress: downloading, then playing.
 pub struct Run {
     stage: Option<(String, u64, u64)>,
@@ -156,10 +164,12 @@ pub struct Run {
     lan_port: Option<u16>,
 }
 
-/// The world this computer is sharing with friends over the internet.
+/// A world or server this computer is sharing with friends over the internet.
 pub struct HostShare {
     /// Instance or server name, shown in the banner.
     instance: String,
+    /// One-line description for friends ("Minecraft 1.21.1 · Fabric 0.16.5").
+    summary: String,
     /// Sharing a server (rather than a world opened to LAN in a game).
     is_server: bool,
     /// What to read out: four words, or the full code if those couldn't be published.
@@ -167,7 +177,7 @@ pub struct HostShare {
     /// The full code, which always works.
     full_code: Option<String>,
     stop: Option<oneshot::Sender<()>>,
-    /// Friends waiting for Allow/Deny.
+    /// People waiting for Allow/Deny.
     requests: Vec<(String, game::JoinReply)>,
     friends: Vec<String>,
 }
@@ -202,9 +212,61 @@ pub struct ServerSettingsForm {
     whitelist_on: bool,
     whitelist: String,
     max_memory: String,
+    skins: bool,
+    extra_ports: String,
+    /// Every other server.properties entry, editable as text.
+    all: Vec<(String, String)>,
+    show_all: bool,
+}
+
+/// server.properties keys the friendly settings (or netherNode itself) manage.
+const MANAGED_PROPERTIES: &[&str] = &[
+    "motd",
+    "max-players",
+    "gamemode",
+    "difficulty",
+    "pvp",
+    "white-list",
+    "enforce-whitelist",
+    "online-mode",
+    "server-port",
+    "enforce-secure-profile",
+];
+
+/// "UDP 24454, TCP 8100" ⇄ ports. Bare numbers mean UDP (what voice mods use).
+fn parse_ports(text: &str) -> Result<Vec<nethernode_core::share::ExtraPort>, String> {
+    let mut ports = Vec::new();
+    for part in text
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let (udp, number) = match part.split_once(char::is_whitespace) {
+            Some((proto, n)) if proto.eq_ignore_ascii_case("udp") => (true, n.trim()),
+            Some((proto, n)) if proto.eq_ignore_ascii_case("tcp") => (false, n.trim()),
+            _ => (true, part),
+        };
+        let port = number
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)
+            .ok_or_else(|| format!("'{part}' isn't a port; write it like UDP 24454 or TCP 8100"))?;
+        ports.push(nethernode_core::share::ExtraPort { udp, port });
+    }
+    Ok(ports)
+}
+
+fn format_ports(ports: &[nethernode_core::share::ExtraPort]) -> String {
+    ports
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub struct NewServerForm {
+    /// Copy this instance's version, loader and mods.
+    from_instance: Option<String>,
     name: String,
     version: Option<String>,
     kind: nethernode_core::server::ServerKind,
@@ -215,6 +277,13 @@ pub struct NewServerForm {
 pub struct JoinSession {
     status: nethernode_core::share::JoinEvent,
     stop: Option<oneshot::Sender<()>>,
+    /// The host's mods, if they play with any, and where to fetch them.
+    mods: Option<(
+        nethernode_core::modsync::Manifest,
+        nethernode_core::share::ModSource,
+    )>,
+    /// An instance that already has the host's mods.
+    matching: Option<String>,
 }
 
 /// The LAN port in a game log line. Versions word it differently: "Published LAN server on
@@ -251,8 +320,18 @@ pub enum Screen {
     Modpacks(PacksView),
     Settings(SettingsForm),
     JoinFriend { code: String, error: Option<String> },
+    Friends(FriendsView),
     Servers(ServersView),
     NewServer(NewServerForm),
+}
+
+pub struct FriendsView {
+    /// A friend code being typed.
+    code: String,
+    /// This computer's current friend code, once made.
+    my_code: Option<String>,
+    /// Adding a friend or making a code is in progress.
+    busy: bool,
 }
 
 /// Something loaded in the background.
@@ -293,6 +372,10 @@ pub enum ServerField {
     WhitelistOn,
     Whitelist,
     MaxMemory,
+    /// Players' skins (online mode against the local skin service).
+    Skins,
+    /// Extra ports for friends, e.g. "UDP 24454, TCP 8100".
+    ExtraPorts,
 }
 
 /// Which folder a Settings "Change…" button is for.
@@ -368,6 +451,8 @@ pub struct PacksView {
 
 pub struct EditForm {
     original: String,
+    /// The name as typed (renames the instance on save).
+    name: String,
     auto_memory: bool,
     max_memory: String,
     java_path: String,
@@ -426,6 +511,7 @@ pub enum Message {
     EditMaxMemory(String),
     EditJava(String),
     EditJvmArgs(String),
+    EditName(String),
     EditWindow(String, String),
     EditFullscreen(bool),
     SaveEdit,
@@ -471,20 +557,39 @@ pub enum Message {
     InviteFriends(String),
     /// Result of looking for a world opened to LAN on this computer.
     LanWorldFound(String, Option<u16>),
-    Share(game::ShareEvent),
-    StopSharing,
-    AnswerJoin(usize, bool),
+    /// A share's event; shares are told apart by [`share_key`].
+    Share(String, game::ShareEvent),
+    StopSharing(String),
+    AnswerJoin(String, usize, bool),
     CopyText(String),
     ShowJoinFriend,
     JoinCodeInput(String),
     StartJoin,
     JoinUpdate(game::JoinUpdate),
     LeaveFriend,
+    /// Make an instance with the joined friend's mods.
+    GetFriendMods,
+    Friends(game::FriendsUpdate),
+    ShowFriends,
+    FriendCodeInput(String),
+    AddFriend,
+    FriendAdded(Result<String, String>),
+    MakeFriendCode,
+    FriendCodeMade(Result<String, String>),
+    AcceptFriend(String),
+    DeclineFriend(String),
+    RemoveFriend(String),
+    /// Join something a friend shares, by its code.
+    JoinShared(String),
+    Done,
+    /// Play this instance straight into the joined friend's world.
+    PlayOnFriend(String),
     ShowServers,
     SelectServer(String),
     ShowNewServer,
     NewServerName(String),
     NewServerVersion(String),
+    NewServerFrom(Option<String>),
     NewServerKind(nethernode_core::server::ServerKind),
     NewServerEula(bool),
     CreateServer,
@@ -496,7 +601,6 @@ pub enum Message {
     SendServerCommand,
     AcceptEula(String),
     InviteServer(String),
-    PlayOnServer(String),
     DeleteServer(String),
     ServerImportWorld(String, bool),
     ServerSupport(
@@ -509,6 +613,9 @@ pub enum Message {
     EditServerSettings,
     ServerSettingsInput(ServerField, String),
     ServerSettingsToggle(ServerField, bool),
+    /// Edit the n-th "all settings" entry of server.properties.
+    ServerPropertyInput(usize, String),
+    ToggleAllServerSettings,
     SaveServerSettings,
     OptiFineAlternative(bool),
     NewAddWorlds(bool),
@@ -589,7 +696,8 @@ impl App {
             refreshing_versions: true,
             pack_jobs: HashMap::new(),
             loader_support: HashMap::new(),
-            host_share: None,
+            shares: Vec::new(),
+            friends: None,
             servers: nethernode_core::server::Server::list(&paths),
             server_runs: HashMap::new(),
             server_jobs: HashMap::new(),
@@ -615,7 +723,13 @@ impl App {
                 "Welcome to netherNode! Add an offline account to get started.".into(),
             ));
         }
-        let tasks = Task::batch([load_versions(paths.clone()), load_textures(paths)]);
+        let me = app
+            .accounts
+            .default
+            .clone()
+            .unwrap_or_else(|| "Player".into());
+        let friends = Task::run(game::friends_service(paths.clone(), me), Message::Friends);
+        let tasks = Task::batch([load_versions(paths.clone()), load_textures(paths), friends]);
         #[cfg(debug_assertions)]
         let tasks = Task::batch([tasks, snapshot::start()]);
         (app, tasks)
@@ -651,6 +765,46 @@ impl App {
 
     fn instance(&self, name: &str) -> Option<&Instance> {
         self.instances.iter().find(|i| i.name == name)
+    }
+
+    /// Join with a code (four words or full) through the friends endpoint when there is one.
+    fn start_join(
+        &mut self,
+        code: String,
+        stop_tx: oneshot::Sender<()>,
+        stop_rx: oneshot::Receiver<()>,
+    ) -> Task<Message> {
+        self.join_session = Some(JoinSession {
+            status: nethernode_core::share::JoinEvent::Connecting,
+            stop: Some(stop_tx),
+            mods: None,
+            matching: None,
+        });
+        let via = self.friends.as_ref().map(|f| f.endpoint());
+        Task::run(
+            game::join_share(self.paths.clone(), code, via, stop_rx),
+            Message::JoinUpdate,
+        )
+    }
+
+    /// Tell friends what we're sharing (with join codes, once each is ready).
+    fn update_friend_sharing(&self) {
+        let Some(friends) = &self.friends else {
+            return;
+        };
+        let sharing = self
+            .shares
+            .iter()
+            .filter_map(|s| {
+                Some(nethernode_core::friends::Shared {
+                    title: s.instance.clone(),
+                    code: s.full_code.clone()?,
+                    server: s.is_server,
+                    summary: s.summary.clone(),
+                })
+            })
+            .collect();
+        friends.set_sharing(sharing);
     }
 
     fn reload_instances(&mut self) {
@@ -1124,9 +1278,9 @@ impl App {
                         self.runs.remove(&name);
                         // The shared world is gone with the game.
                         if let Some(share) = self
-                            .host_share
-                            .as_mut()
-                            .filter(|s| !s.is_server && s.instance == name)
+                            .shares
+                            .iter_mut()
+                            .find(|s| !s.is_server && s.instance == name)
                             && let Some(stop) = share.stop.take()
                         {
                             let _ = stop.send(());
@@ -1342,6 +1496,7 @@ impl App {
                 let current = i.loader.as_ref().map(|l| l.version.clone());
                 let form = EditForm {
                     original: i.name.clone(),
+                    name: i.name.clone(),
                     auto_memory: i.max_memory_mb.is_none(),
                     max_memory: i
                         .max_memory_mb
@@ -1386,6 +1541,11 @@ impl App {
                     f.java_path = v;
                 }
             }
+            Message::EditName(v) => {
+                if let Screen::EditInstance(f) = &mut self.screen {
+                    f.name = v;
+                }
+            }
             Message::EditJvmArgs(v) => {
                 if let Screen::EditInstance(f) = &mut self.screen {
                     f.jvm_args = v;
@@ -1407,6 +1567,43 @@ impl App {
                     return Task::none();
                 };
                 let Some(mut instance) = self.instance(&f.original).cloned() else {
+                    return Task::none();
+                };
+                let new_name = f.name.trim().to_string();
+                if new_name != f.original {
+                    let original = f.original.clone();
+                    if self.runs.contains_key(&original) || self.jobs.contains_key(&original) {
+                        self.error("Close the game (and wait for installs) before renaming");
+                        return Task::none();
+                    }
+                    match nethernode_core::instance::Instance::rename(
+                        &self.paths,
+                        &original,
+                        &new_name,
+                    ) {
+                        Ok(renamed) => {
+                            instance.name = renamed.name.clone();
+                            if self.selected.as_deref() == Some(original.as_str()) {
+                                self.selected = Some(renamed.name.clone());
+                            }
+                            if let Some(log) = self.logs.remove(&original) {
+                                self.logs.insert(renamed.name.clone(), log);
+                            }
+                            if let Some(crash) = self.crashes.remove(&original) {
+                                self.crashes.insert(renamed.name.clone(), crash);
+                            }
+                            self.reload_instances();
+                            if let Screen::EditInstance(f) = &mut self.screen {
+                                f.original = renamed.name;
+                            }
+                        }
+                        Err(e) => {
+                            self.error(e.to_string());
+                            return Task::none();
+                        }
+                    }
+                }
+                let Screen::EditInstance(f) = &self.screen else {
                     return Task::none();
                 };
                 instance.max_memory_mb = if f.auto_memory {
@@ -1510,12 +1707,28 @@ impl App {
                         move |port| Message::LanWorldFound(name.clone(), port),
                     );
                 };
-                if self.host_share.is_some() {
+                let key = share_key(false, &name);
+                if self
+                    .shares
+                    .iter()
+                    .any(|s| share_key(s.is_server, &s.instance) == key)
+                {
                     return Task::none();
                 }
+                let Some(instance) = self.instance(&name).cloned() else {
+                    return Task::none();
+                };
                 let (stop_tx, stop_rx) = oneshot::channel();
-                self.host_share = Some(HostShare {
+                self.shares.push(HostShare {
                     is_server: false,
+                    summary: format!(
+                        "Minecraft {} · {}",
+                        instance.minecraft_version(),
+                        instance
+                            .loader
+                            .as_ref()
+                            .map_or("Vanilla".into(), |l| format!("{} {}", l.kind, l.version))
+                    ),
                     instance: name,
                     code: None,
                     full_code: None,
@@ -1523,21 +1736,62 @@ impl App {
                     requests: Vec::new(),
                     friends: Vec::new(),
                 });
-                return Task::run(
-                    game::host_share(self.paths.clone(), port, stop_rx),
-                    Message::Share,
-                );
+                let paths = self.paths.clone();
+                let options = async move {
+                    let mods_dir = instance.mods_dir(&paths);
+                    let manifest = if instance.loader.is_some() {
+                        nethernode_core::modsync::build(
+                            &download::client(),
+                            instance.minecraft_version(),
+                            instance.loader.as_ref(),
+                            &mods_dir,
+                        )
+                        .await
+                        .ok()
+                        .map(|m| (m, mods_dir))
+                    } else {
+                        None
+                    };
+                    nethernode_core::share::HostOptions {
+                        lan_port: port,
+                        title: instance.name.clone(),
+                        extra_ports: nethernode_core::share::detect_mod_ports(
+                            &instance.game_dir(&paths),
+                            port,
+                        ),
+                        manifest,
+                        skins: nethernode_core::skins::for_sharing(&paths),
+                    }
+                };
+                return Task::run(game::host_share(options, stop_rx), move |e| {
+                    Message::Share(key.clone(), e)
+                });
             }
-            Message::Share(event) => {
-                let Some(share) = self.host_share.as_mut() else {
+            Message::Share(key, event) => {
+                let friends = self.friends.clone();
+                let Some(index) = self
+                    .shares
+                    .iter()
+                    .position(|s| share_key(s.is_server, &s.instance) == key)
+                else {
                     return Task::none();
                 };
+                let share = &mut self.shares[index];
                 match event {
                     game::ShareEvent::Ready(code, full) => {
                         share.code = Some(code);
                         share.full_code = Some(full);
+                        self.update_friend_sharing();
                     }
-                    game::ShareEvent::Request(friend, reply) => {
+                    game::ShareEvent::Request(friend, id, reply) => {
+                        // Friends are let in without asking.
+                        if let Some(name) = friends.as_ref().and_then(|f| f.friend_name(&id)) {
+                            if let Some(reply) = reply.lock().unwrap().take() {
+                                let _ = reply.send(true);
+                            }
+                            share.friends.push(name.clone());
+                            return Task::none();
+                        }
                         let world = share.instance.clone();
                         share.requests.push((friend, reply));
                         return alert(
@@ -1559,20 +1813,29 @@ impl App {
                     }
                     game::ShareEvent::Left(friend) => share.friends.retain(|f| *f != friend),
                     game::ShareEvent::Ended(result) => {
-                        self.host_share = None;
+                        self.shares.remove(index);
+                        self.update_friend_sharing();
                         if let Err(e) = result {
                             self.error(format!("Sharing stopped: {e}"));
                         }
                     }
                 }
             }
-            Message::StopSharing => {
-                if let Some(stop) = self.host_share.as_mut().and_then(|s| s.stop.take()) {
+            Message::StopSharing(key) => {
+                if let Some(stop) = self
+                    .shares
+                    .iter_mut()
+                    .find(|s| share_key(s.is_server, &s.instance) == key)
+                    .and_then(|s| s.stop.take())
+                {
                     let _ = stop.send(());
                 }
             }
-            Message::AnswerJoin(index, allow) => {
-                if let Some(share) = self.host_share.as_mut()
+            Message::AnswerJoin(key, index, allow) => {
+                if let Some(share) = self
+                    .shares
+                    .iter_mut()
+                    .find(|s| share_key(s.is_server, &s.instance) == key)
                     && index < share.requests.len()
                 {
                     let (_, reply) = share.requests.remove(index);
@@ -1608,17 +1871,21 @@ impl App {
                     return Task::none();
                 }
                 let (stop_tx, stop_rx) = oneshot::channel();
-                self.join_session = Some(JoinSession {
-                    status: nethernode_core::share::JoinEvent::Connecting,
-                    stop: Some(stop_tx),
-                });
                 self.screen = Screen::Home;
-                return Task::run(
-                    game::join_share(self.paths.clone(), parsed, stop_rx),
-                    Message::JoinUpdate,
-                );
+                return self.start_join(parsed, stop_tx, stop_rx);
             }
             Message::JoinUpdate(update) => match update {
+                game::JoinUpdate::Status(nethernode_core::share::JoinEvent::Mods(
+                    manifest,
+                    source,
+                )) => {
+                    let matching = nethernode_core::modsync::find_matching(&self.paths, &manifest)
+                        .map(|i| i.name);
+                    if let Some(session) = self.join_session.as_mut() {
+                        session.matching = matching;
+                        session.mods = Some((manifest, source));
+                    }
+                }
                 game::JoinUpdate::Status(status) => {
                     if let Some(session) = self.join_session.as_mut() {
                         session.status = status;
@@ -1637,6 +1904,182 @@ impl App {
                     }
                 }
             },
+            Message::Friends(update) => match update {
+                game::FriendsUpdate::Started(friends) => {
+                    self.friends = Some(friends);
+                    self.update_friend_sharing();
+                }
+                game::FriendsUpdate::Failed(e) => {
+                    eprintln!("friends are offline: {e}");
+                }
+                // The view reads the latest list; nothing to store.
+                game::FriendsUpdate::Changed => {}
+            },
+            Message::ShowFriends => {
+                self.screen = Screen::Friends(FriendsView {
+                    code: String::new(),
+                    my_code: None,
+                    busy: false,
+                });
+            }
+            Message::FriendCodeInput(value) => {
+                if let Screen::Friends(v) = &mut self.screen {
+                    v.code = value;
+                }
+            }
+            Message::AddFriend => {
+                let (Screen::Friends(v), Some(friends)) = (&mut self.screen, self.friends.clone())
+                else {
+                    self.error("Friends aren't available right now (no internet?)");
+                    return Task::none();
+                };
+                if v.code.trim().is_empty() {
+                    return Task::none();
+                }
+                v.busy = true;
+                let code = v.code.trim().to_string();
+                return Task::perform(
+                    async move {
+                        friends
+                            .add(&code)
+                            .await
+                            .map(|f| f.name)
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::FriendAdded,
+                );
+            }
+            Message::FriendAdded(result) => {
+                if let Screen::Friends(v) = &mut self.screen {
+                    v.busy = false;
+                    if result.is_ok() {
+                        v.code.clear();
+                    }
+                }
+                match result {
+                    Ok(name) => {
+                        self.notice = Some((
+                            false,
+                            format!(
+                                "Friend request sent to {name}. They'll show as a friend once they accept."
+                            ),
+                        ))
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Message::MakeFriendCode => {
+                let Some(friends) = self.friends.clone() else {
+                    self.error("Friends aren't available right now (no internet?)");
+                    return Task::none();
+                };
+                if let Screen::Friends(v) = &mut self.screen {
+                    v.busy = true;
+                }
+                return Task::perform(
+                    async move {
+                        friends
+                            .friend_code()
+                            .await
+                            .map(|c| c.to_string())
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::FriendCodeMade,
+                );
+            }
+            Message::FriendCodeMade(result) => {
+                if let Screen::Friends(v) = &mut self.screen {
+                    v.busy = false;
+                    match result {
+                        Ok(code) => v.my_code = Some(code),
+                        Err(e) => self.notice = Some((true, e)),
+                    }
+                }
+            }
+            Message::AcceptFriend(id) => {
+                if let Some(friends) = self.friends.clone() {
+                    return Task::perform(
+                        async move {
+                            let _ = friends.accept(&id).await;
+                        },
+                        |()| Message::Done,
+                    );
+                }
+            }
+            Message::DeclineFriend(id) => {
+                if let Some(friends) = &self.friends {
+                    friends.decline(&id);
+                }
+            }
+            Message::RemoveFriend(id) => {
+                if let Some(friends) = self.friends.clone() {
+                    return Task::perform(async move { friends.remove(&id).await }, |()| {
+                        Message::Done
+                    });
+                }
+            }
+            Message::JoinShared(code) => {
+                if self.join_session.is_some() {
+                    self.error("You're already in a friend's world; leave it first");
+                    return Task::none();
+                }
+                let (stop_tx, stop_rx) = oneshot::channel();
+                self.screen = Screen::Home;
+                return self.start_join(code, stop_tx, stop_rx);
+            }
+            Message::Done => {}
+            Message::GetFriendMods => {
+                let Some((manifest, source)) =
+                    self.join_session.as_ref().and_then(|s| s.mods.clone())
+                else {
+                    return Task::none();
+                };
+                let title = match self.join_session.as_ref().map(|s| &s.status) {
+                    Some(nethernode_core::share::JoinEvent::Ready { title, .. }) => title.clone(),
+                    _ => "Friend".into(),
+                };
+                // A free instance name based on the world's.
+                let base = format!("{} (friend)", title.trim());
+                let name = (1..)
+                    .map(|n| {
+                        if n == 1 {
+                            base.clone()
+                        } else {
+                            format!("{base} {n}")
+                        }
+                    })
+                    .find(|n| {
+                        !self
+                            .instances
+                            .iter()
+                            .any(|i| i.name.eq_ignore_ascii_case(n))
+                            && !self.jobs.contains_key(n)
+                    })
+                    .expect("some name is free");
+                self.jobs.insert(
+                    name.clone(),
+                    Job {
+                        label: "Getting your friend's mods".into(),
+                        stage: None,
+                    },
+                );
+                if let Some(session) = self.join_session.as_mut() {
+                    session.matching = Some(name.clone());
+                }
+                let stream =
+                    game::get_friend_mods(self.paths.clone(), manifest, source, name.clone());
+                return Task::run(stream, move |e| Message::Job(name.clone(), e));
+            }
+            Message::PlayOnFriend(instance) => {
+                let Some(nethernode_core::share::JoinEvent::Ready { port, .. }) =
+                    self.join_session.as_ref().map(|s| s.status.clone())
+                else {
+                    return Task::none();
+                };
+                let target =
+                    nethernode_core::launch::QuickPlay::Multiplayer(format!("localhost:{port}"));
+                return self.play(instance, Some(target));
+            }
             Message::LeaveFriend => {
                 if let Some(stop) = self.join_session.as_mut().and_then(|s| s.stop.take()) {
                     let _ = stop.send(());
@@ -1671,6 +2114,7 @@ impl App {
                     .first()
                     .map(|c| c.id.clone());
                 self.screen = Screen::NewServer(NewServerForm {
+                    from_instance: None,
                     name: String::new(),
                     version: version.clone(),
                     kind: nethernode_core::server::ServerKind::Vanilla,
@@ -1688,6 +2132,23 @@ impl App {
                     f.version = Some(version.clone());
                 }
                 return self.check_server_support(Some(version));
+            }
+            Message::NewServerFrom(instance) => {
+                let picked = instance.and_then(|n| self.instance(&n).cloned());
+                if let Screen::NewServer(f) = &mut self.screen {
+                    f.from_instance = picked.as_ref().map(|i| i.name.clone());
+                    if let Some(i) = &picked {
+                        f.version = Some(i.minecraft_version().to_string());
+                        if let Some(kind) = nethernode_core::server::ServerKind::for_loader(
+                            i.loader.as_ref().map(|l| l.kind),
+                        ) {
+                            f.kind = kind;
+                        }
+                    }
+                }
+                if let Some(i) = picked {
+                    return self.check_server_support(Some(i.minecraft_version().to_string()));
+                }
             }
             Message::NewServerKind(kind) => {
                 if let Screen::NewServer(f) = &mut self.screen {
@@ -1729,7 +2190,16 @@ impl App {
                 } else {
                     f.name.trim().to_string()
                 };
-                let mut created = match Server::create(&self.paths, &name, &version, f.kind) {
+                let source = f
+                    .from_instance
+                    .as_ref()
+                    .and_then(|n| self.instance(n))
+                    .cloned();
+                let created = match &source {
+                    Some(instance) => Server::create_from_instance(&self.paths, &name, instance),
+                    None => Server::create(&self.paths, &name, &version, f.kind),
+                };
+                let mut created = match created {
                     Ok(created) => created,
                     Err(e) => {
                         self.error(e.to_string());
@@ -1756,14 +2226,31 @@ impl App {
                 });
                 let paths = self.paths.clone();
                 let stream = game::job(move |progress| async move {
-                    let result =
-                        server::install(&download::client(), &paths, &mut created, &progress).await;
-                    if result.is_err() {
-                        let _ = Server::delete(&paths, &created.name);
+                    let http = download::client();
+                    let mut result = server::install(&http, &paths, &mut created, &progress)
+                        .await
+                        .map(|()| "ready to start".to_string());
+                    if let (Ok(_), Some(instance)) = (&result, &source) {
+                        result = server::copy_instance_mods(&http, &paths, &created, instance)
+                            .await
+                            .map(|skipped| {
+                                if skipped.is_empty() {
+                                    "ready to start, with the instance's mods".to_string()
+                                } else {
+                                    format!(
+                                        "ready to start; left out client-only mods: {}",
+                                        skipped.join(", ")
+                                    )
+                                }
+                            });
                     }
-                    result
-                        .map(|()| "ready to start".to_string())
-                        .map_err(|e| e.to_string())
+                    match &result {
+                        Ok(_) => created.add_to_multiplayer_lists(&paths),
+                        Err(_) => {
+                            let _ = Server::delete(&paths, &created.name);
+                        }
+                    }
+                    result.map_err(|e| e.to_string())
                 });
                 return Task::run(stream, move |event| Message::ServerJob(name.clone(), event));
             }
@@ -1798,6 +2285,8 @@ impl App {
                 let Some(server) = self.servers.iter().find(|s| s.name == name).cloned() else {
                     return Task::none();
                 };
+                // The host joins from Minecraft's Multiplayer list, like everyone else.
+                server.add_to_multiplayer_lists(&self.paths);
                 let (commands_tx, commands_rx) = futures::channel::mpsc::unbounded();
                 let (stop_tx, stop_rx) = oneshot::channel();
                 self.server_runs.insert(
@@ -1862,9 +2351,9 @@ impl App {
                     game::ServerUpdate::Ended(result) => {
                         self.server_runs.remove(&name);
                         if let Some(share) = self
-                            .host_share
-                            .as_mut()
-                            .filter(|s| s.is_server && s.instance == name)
+                            .shares
+                            .iter_mut()
+                            .find(|s| s.is_server && s.instance == name)
                             && let Some(stop) = share.stop.take()
                         {
                             let _ = stop.send(());
@@ -1911,14 +2400,23 @@ impl App {
                     self.error("Start the server first");
                     return Task::none();
                 }
-                if self.host_share.is_some() {
-                    self.error("Already sharing something; stop that first");
+                let key = share_key(true, &name);
+                if self
+                    .shares
+                    .iter()
+                    .any(|s| share_key(s.is_server, &s.instance) == key)
+                {
                     return Task::none();
                 }
-                let port = server.port;
+                let server = server.clone();
                 let (stop_tx, stop_rx) = oneshot::channel();
-                self.host_share = Some(HostShare {
+                self.shares.push(HostShare {
                     instance: name,
+                    summary: format!(
+                        "Minecraft {} · {} server",
+                        server.minecraft,
+                        server.kind.name()
+                    ),
                     is_server: true,
                     code: None,
                     full_code: None,
@@ -1926,39 +2424,21 @@ impl App {
                     requests: Vec::new(),
                     friends: Vec::new(),
                 });
-                return Task::run(
-                    game::host_share(self.paths.clone(), port, stop_rx),
-                    Message::Share,
-                );
-            }
-            Message::PlayOnServer(name) => {
-                let Some(server) = self.servers.iter().find(|s| s.name == name).cloned() else {
-                    return Task::none();
+                let paths = self.paths.clone();
+                let options = async move {
+                    let http = download::client();
+                    nethernode_core::share::HostOptions {
+                        lan_port: server.port,
+                        title: server.name.clone(),
+                        extra_ports: server.ports_for_friends(&paths),
+                        manifest: nethernode_core::server::friend_manifest(&http, &paths, &server)
+                            .await,
+                        skins: nethernode_core::skins::for_sharing(&paths),
+                    }
                 };
-                // The selected instance if it's the right version, else any that is.
-                let instance = self
-                    .selected
-                    .as_ref()
-                    .and_then(|n| self.instance(n))
-                    .filter(|i| i.minecraft_version() == server.minecraft)
-                    .or_else(|| {
-                        self.instances
-                            .iter()
-                            .find(|i| i.minecraft_version() == server.minecraft)
-                    })
-                    .map(|i| i.name.clone());
-                let Some(instance) = instance else {
-                    self.error(format!(
-                        "Create an instance for Minecraft {} to play on this server",
-                        server.minecraft
-                    ));
-                    return Task::none();
-                };
-                let target = nethernode_core::launch::QuickPlay::Multiplayer(format!(
-                    "localhost:{}",
-                    server.port
-                ));
-                return self.play(instance, Some(target));
+                return Task::run(game::host_share(options, stop_rx), move |e| {
+                    Message::Share(key.clone(), e)
+                });
             }
             Message::DeleteServer(name) => {
                 if self.server_runs.contains_key(&name) {
@@ -2050,7 +2530,16 @@ impl App {
                 let get = |k: &str, default: &str| {
                     props.get(k).cloned().unwrap_or_else(|| default.to_string())
                 };
+                let all = props
+                    .iter()
+                    .filter(|(k, _)| !MANAGED_PROPERTIES.contains(&k.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 v.settings = Some(ServerSettingsForm {
+                    skins: server.skins,
+                    extra_ports: format_ports(&server.extra_ports),
+                    all,
+                    show_all: false,
                     motd: get("motd", ""),
                     max_players: get("max-players", "10"),
                     gamemode: get("gamemode", "survival"),
@@ -2082,7 +2571,8 @@ impl App {
                             f.max_memory =
                                 value.chars().filter(char::is_ascii_digit).take(6).collect()
                         }
-                        ServerField::Pvp | ServerField::WhitelistOn => {}
+                        ServerField::ExtraPorts => f.extra_ports = value,
+                        ServerField::Pvp | ServerField::WhitelistOn | ServerField::Skins => {}
                     }
                 }
             }
@@ -2094,8 +2584,26 @@ impl App {
                     match field {
                         ServerField::Pvp => f.pvp = on,
                         ServerField::WhitelistOn => f.whitelist_on = on,
+                        ServerField::Skins => f.skins = on,
                         _ => {}
                     }
+                }
+            }
+            Message::ServerPropertyInput(index, value) => {
+                if let Screen::Servers(ServersView {
+                    settings: Some(f), ..
+                }) = &mut self.screen
+                    && let Some(entry) = f.all.get_mut(index)
+                {
+                    entry.1 = value;
+                }
+            }
+            Message::ToggleAllServerSettings => {
+                if let Screen::Servers(ServersView {
+                    settings: Some(f), ..
+                }) = &mut self.screen
+                {
+                    f.show_all = !f.show_all;
                 }
             }
             Message::SaveServerSettings => {
@@ -2117,27 +2625,40 @@ impl App {
                     .map(String::from)
                     .collect();
                 srv.max_memory_mb = f.max_memory.parse::<u32>().ok().filter(|m| *m >= 512);
+                srv.skins = f.skins;
+                srv.extra_ports = match parse_ports(&f.extra_ports) {
+                    Ok(ports) => ports,
+                    Err(e) => {
+                        self.error(e);
+                        return Task::none();
+                    }
+                };
                 let dir = srv.dir(&self.paths);
                 let pvp = if f.pvp { "true" } else { "false" };
-                let result = server::set_properties(
-                    &dir,
-                    &[
-                        ("motd", f.motd.as_str()),
-                        (
-                            "max-players",
-                            if f.max_players.is_empty() {
-                                "10"
-                            } else {
-                                f.max_players.as_str()
-                            },
-                        ),
-                        ("gamemode", f.gamemode.as_str()),
-                        ("difficulty", f.difficulty.as_str()),
-                        ("pvp", pvp),
-                    ],
-                )
-                .and_then(|()| server::set_whitelist(&self.paths, &srv, f.whitelist_on, &names))
-                .and_then(|()| srv.save(&self.paths));
+                let others: Vec<(&str, &str)> =
+                    f.all.iter().map(|(k, v)| (k.as_str(), v.trim())).collect();
+                let result = server::set_properties(&dir, &others)
+                    .and_then(|()| {
+                        server::set_properties(
+                            &dir,
+                            &[
+                                ("motd", f.motd.as_str()),
+                                (
+                                    "max-players",
+                                    if f.max_players.is_empty() {
+                                        "10"
+                                    } else {
+                                        f.max_players.as_str()
+                                    },
+                                ),
+                                ("gamemode", f.gamemode.as_str()),
+                                ("difficulty", f.difficulty.as_str()),
+                                ("pvp", pvp),
+                            ],
+                        )
+                    })
+                    .and_then(|()| server::set_whitelist(&self.paths, &srv, f.whitelist_on, &names))
+                    .and_then(|()| srv.save(&self.paths));
                 match result {
                     Ok(()) => {
                         v.settings = None;
@@ -2450,6 +2971,9 @@ impl App {
                 }
             }
             Message::SetDefaultAccount(name) => {
+                if let Some(friends) = &self.friends {
+                    friends.set_name(&name);
+                }
                 if let Err(e) = self
                     .accounts
                     .set_default(&name)

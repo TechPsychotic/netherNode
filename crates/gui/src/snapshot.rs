@@ -100,14 +100,20 @@ pub fn update(app: &mut App, step: Step) -> Task<Message> {
                 "host-request" => {
                     // Publish the code for an outside joiner, then wait for its request.
                     if let (Some(dir), Some(code)) =
-                        (dir(), app.host_share.as_ref().and_then(|s| s.code.clone()))
+                        (dir(), app.shares.first().and_then(|s| s.code.clone()))
                     {
                         let _ = std::fs::write(dir.join("code.txt"), code);
                     }
                     25_000
                 }
                 "host-allow" => {
-                    send(app, Message::AnswerJoin(0, true));
+                    if let Some(key) = app
+                        .shares
+                        .first()
+                        .map(|s| crate::share_key(s.is_server, &s.instance))
+                    {
+                        send(app, Message::AnswerJoin(key, 0, true));
+                    }
                     6000
                 }
                 "join-friend" => {
@@ -145,6 +151,20 @@ pub fn update(app: &mut App, step: Step) -> Task<Message> {
                 "server-settings" => {
                     send(app, Message::EditServerSettings);
                     800
+                }
+                "friends" => {
+                    send(app, Message::ShowFriends);
+                    6000
+                }
+                "server-settings-all" => {
+                    send(app, Message::EditServerSettings);
+                    send(app, Message::ToggleAllServerSettings);
+                    800
+                }
+                "new-server-from" => {
+                    send(app, Message::ShowNewServer);
+                    send(app, Message::NewServerFrom(Some(selected.clone())));
+                    4000
                 }
                 "new-server" => {
                     send(app, Message::ShowNewServer);

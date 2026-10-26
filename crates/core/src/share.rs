@@ -18,6 +18,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,16 +26,22 @@ use std::time::Duration;
 use futures::channel::oneshot;
 use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointId};
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 use crate::error::{Result, other};
+use crate::modsync::Manifest;
 use crate::skins::{self, SkinRecord, SkinStore};
 
-pub const ALPN: &[u8] = b"nethernode/minecraft-lan/2";
+pub const ALPN: &[u8] = b"nethernode/minecraft-lan/3";
 /// First byte of every stream after approval: what the stream carries.
 const STREAM_MINECRAFT: u8 = 1;
 const STREAM_SKINS: u8 = 2;
+/// Followed by the host's port (u16): a TCP connection to an extra port.
+const STREAM_TCP_PORT: u8 = 3;
+/// Followed by a mod's SHA-1 (40 hex characters): send that mod jar.
+const STREAM_MOD_FILE: u8 = 4;
 /// Largest skin message accepted (a handful of skins and capes).
 const MAX_SKIN_FRAME: usize = 4 * 1024 * 1024;
 /// Most skins one friend may announce.
@@ -94,8 +101,11 @@ async fn pipe(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream) {
     tokio::join!(up, down);
 }
 
-async fn bind() -> Result<Endpoint> {
+async fn bind(identity: Option<iroh::SecretKey>) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(presets::N0).alpns(vec![ALPN.to_vec()]);
+    if let Some(key) = identity {
+        builder = builder.secret_key(key);
+    }
     // Diagnostics: force the relay path, as on networks where hole punching fails.
     if std::env::var_os("NETHERNODE_SHARE_RELAY_ONLY").is_some() {
         builder = builder.clear_ip_transports();
@@ -106,12 +116,12 @@ async fn bind() -> Result<Endpoint> {
         .map_err(|e| other(format!("couldn't start networking: {e}")))
 }
 
-async fn write_frame(send: &mut SendStream, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) async fn write_frame(send: &mut SendStream, bytes: &[u8]) -> std::io::Result<()> {
     send.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
     Ok(send.write_all(bytes).await?)
 }
 
-async fn read_frame(recv: &mut RecvStream) -> Option<Vec<u8>> {
+pub(crate) async fn read_frame(recv: &mut RecvStream) -> Option<Vec<u8>> {
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await.ok()?;
     let len = u32::from_be_bytes(len) as usize;
@@ -217,6 +227,47 @@ async fn exchange_skins(conn: Connection, store: SkinStore) {
     }
 }
 
+/// A port besides Minecraft's that mods use, such as Simple Voice Chat's UDP port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExtraPort {
+    pub udp: bool,
+    pub port: u16,
+}
+
+impl fmt::Display for ExtraPort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", if self.udp { "UDP" } else { "TCP" }, self.port)
+    }
+}
+
+/// What an approved friend is told about the session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct Welcome {
+    /// The world's or server's name.
+    title: String,
+    /// The host's Minecraft port (UDP on the same number is forwarded too, for mods that use
+    /// it, like Simple Voice Chat by default).
+    game_port: u16,
+    #[serde(default)]
+    extra_ports: Vec<ExtraPort>,
+    #[serde(default)]
+    manifest: Option<Manifest>,
+}
+
+/// What to share and how.
+#[derive(Debug, Clone, Default)]
+pub struct HostOptions {
+    /// The Minecraft port on this computer (a world opened to LAN, or a server).
+    pub lan_port: u16,
+    /// Shown to friends.
+    pub title: String,
+    pub extra_ports: Vec<ExtraPort>,
+    /// The mods friends need, and the folder they can be fetched from.
+    pub manifest: Option<(Manifest, PathBuf)>,
+    /// Exchange skins (see [`crate::skins::for_sharing`]).
+    pub skins: Option<SkinStore>,
+}
+
 /// Something the host's UI should show.
 pub enum HostEvent {
     /// Sharing is live; give friends the short code (or the full one if it couldn't be
@@ -226,8 +277,10 @@ pub enum HostEvent {
         short: Option<crate::invite::ShortCode>,
     },
     /// Someone with the right code wants in. Answer through `reply` (dropping it = deny).
+    /// `id` identifies their netherNode, so friends can be let in automatically.
     Request {
         friend: String,
+        id: EndpointId,
         reply: oneshot::Sender<bool>,
     },
     Joined {
@@ -238,15 +291,13 @@ pub enum HostEvent {
     },
 }
 
-/// Share `127.0.0.1:lan_port` (the world opened to LAN) until `stop` completes.
-/// With `skins`, players' skins are exchanged too (see [`crate::skins::for_sharing`]).
+/// Share a Minecraft port until `stop` completes.
 pub async fn host(
-    lan_port: u16,
-    skins: Option<SkinStore>,
+    options: HostOptions,
     on_event: impl Fn(HostEvent) + Send + Sync + 'static,
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
-    let endpoint = bind().await?;
+    let endpoint = bind(None).await?;
     // Wait until reachable via a relay, so the code works straight away.
     let _ = tokio::time::timeout(Duration::from_secs(20), endpoint.online()).await;
     let mut secret = [0u8; SECRET_LEN];
@@ -280,19 +331,29 @@ pub async fn host(
     };
     on_event(HostEvent::Ready { code, short });
 
-    let on_event = Arc::new(on_event);
-    let approved: Arc<Mutex<HashSet<EndpointId>>> = Arc::default();
-    let hub = skins.map(|store| Arc::new(SkinHub::new(store)));
+    let session = Arc::new(Session {
+        welcome: Welcome {
+            title: options.title.clone(),
+            game_port: options.lan_port,
+            extra_ports: options.extra_ports.clone(),
+            manifest: options.manifest.as_ref().map(|(m, _)| m.clone()),
+        },
+        mods_dir: options.manifest.map(|(_, dir)| dir),
+        secret,
+        on_event: Box::new(on_event),
+        approved: Mutex::default(),
+        hub: options.skins.map(SkinHub::new),
+    });
     tokio::pin!(stop, republish);
     loop {
         tokio::select! {
             () = &mut republish => {}
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
-                let (on_event, approved, hub) = (on_event.clone(), approved.clone(), hub.clone());
+                let session = session.clone();
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
-                    serve_friend(conn, secret, lan_port, on_event, approved, hub).await;
+                    session.serve_friend(conn).await;
                 });
             }
             () = &mut stop => break,
@@ -302,88 +363,223 @@ pub async fn host(
     Ok(())
 }
 
-async fn serve_friend(
-    conn: Connection,
+/// One hosting session, shared by every friend's connection.
+struct Session {
+    welcome: Welcome,
+    mods_dir: Option<PathBuf>,
     secret: [u8; SECRET_LEN],
-    lan_port: u16,
-    on_event: Arc<impl Fn(HostEvent) + Send + Sync + 'static>,
-    approved: Arc<Mutex<HashSet<EndpointId>>>,
-    hub: Option<Arc<SkinHub>>,
-) {
-    let friend_id = conn.remote_id();
-    let friend = friend_id.fmt_short().to_string();
+    on_event: Box<dyn Fn(HostEvent) + Send + Sync>,
+    approved: Mutex<HashSet<EndpointId>>,
+    hub: Option<SkinHub>,
+}
 
-    // 1. The secret, on a control stream. Wrong or missing: drop without a prompt.
-    let Ok(Ok((mut control_send, mut control_recv))) =
-        tokio::time::timeout(Duration::from_secs(15), conn.accept_bi()).await
-    else {
-        return;
-    };
-    let mut presented = [0u8; SECRET_LEN];
-    let read = tokio::time::timeout(
-        Duration::from_secs(15),
-        control_recv.read_exact(&mut presented),
-    )
-    .await;
-    if !matches!(read, Ok(Ok(_))) || presented != secret {
-        conn.close(1u32.into(), b"wrong code");
-        return;
+impl Session {
+    fn allowed_port(&self, udp: bool, port: u16) -> bool {
+        (udp && port == self.welcome.game_port)
+            || self.welcome.extra_ports.contains(&ExtraPort { udp, port })
     }
 
-    // 2. The host decides (once per friend per session).
-    let known = approved.lock().unwrap().contains(&friend_id);
-    if !known {
-        let (reply, answer) = oneshot::channel();
-        on_event(HostEvent::Request {
-            friend: friend.clone(),
-            reply,
-        });
-        let allowed = matches!(
-            tokio::time::timeout(Duration::from_secs(120), answer).await,
-            Ok(Ok(true))
-        );
-        if !allowed {
-            let _ = control_send.write_all(&[0]).await;
-            let _ = control_send.finish();
-            conn.close(2u32.into(), b"denied");
+    async fn serve_friend(self: Arc<Self>, conn: Connection) {
+        let friend_id = conn.remote_id();
+        let friend = friend_id.fmt_short().to_string();
+
+        // 1. The secret, on a control stream. Wrong or missing: drop without a prompt.
+        let Ok(Ok((mut control_send, mut control_recv))) =
+            tokio::time::timeout(Duration::from_secs(15), conn.accept_bi()).await
+        else {
+            return;
+        };
+        let mut presented = [0u8; SECRET_LEN];
+        let read = tokio::time::timeout(
+            Duration::from_secs(15),
+            control_recv.read_exact(&mut presented),
+        )
+        .await;
+        if !matches!(read, Ok(Ok(_))) || presented != self.secret {
+            conn.close(1u32.into(), b"wrong code");
             return;
         }
-        approved.lock().unwrap().insert(friend_id);
-    }
-    let _ = control_send.write_all(&[1]).await;
-    let _ = control_send.finish();
-    on_event(HostEvent::Joined {
-        friend: friend.clone(),
-    });
 
-    // 3. Every further stream is a Minecraft connection to the LAN world, or skins.
-    while let Ok((send, mut recv)) = conn.accept_bi().await {
-        let hub = hub.clone();
-        tokio::spawn(async move {
-            let mut kind = [0u8; 1];
-            if recv.read_exact(&mut kind).await.is_err() {
+        // 2. The host decides (once per friend per session).
+        let known = self.approved.lock().unwrap().contains(&friend_id);
+        if !known {
+            let (reply, answer) = oneshot::channel();
+            (self.on_event)(HostEvent::Request {
+                friend: friend.clone(),
+                id: friend_id,
+                reply,
+            });
+            let allowed = matches!(
+                tokio::time::timeout(Duration::from_secs(120), answer).await,
+                Ok(Ok(true))
+            );
+            if !allowed {
+                let _ = control_send.write_all(&[0]).await;
+                let _ = control_send.finish();
+                conn.close(2u32.into(), b"denied");
                 return;
             }
-            match kind[0] {
-                STREAM_MINECRAFT => {
-                    if let Ok(tcp) = TcpStream::connect((Ipv4Addr::LOCALHOST, lan_port)).await {
-                        pipe(tcp, send, recv).await;
-                    }
-                }
-                STREAM_SKINS => {
-                    if let Some(hub) = hub {
-                        hub.serve(send, recv).await;
-                    }
-                }
-                _ => {}
-            }
+            self.approved.lock().unwrap().insert(friend_id);
+        }
+        let welcome = serde_json::to_vec(&self.welcome).unwrap_or_default();
+        if control_send.write_all(&[1]).await.is_err()
+            || write_frame(&mut control_send, &welcome).await.is_err()
+        {
+            return;
+        }
+        let _ = control_send.finish();
+        (self.on_event)(HostEvent::Joined {
+            friend: friend.clone(),
         });
+
+        // 3. Datagrams carry UDP for the game port and extra UDP ports.
+        let udp = UdpRelay::default();
+        let datagrams = {
+            let (conn, session, udp) = (conn.clone(), self.clone(), udp.clone());
+            async move {
+                while let Ok(datagram) = conn.read_datagram().await {
+                    let Some((port, payload)) = split_datagram(&datagram) else {
+                        continue;
+                    };
+                    if session.allowed_port(true, port) {
+                        udp.host_send(&conn, port, payload).await;
+                    }
+                }
+            }
+        };
+
+        // 4. Every stream is a Minecraft connection, an extra TCP port, skins or a mod file.
+        let streams = async {
+            while let Ok((send, mut recv)) = conn.accept_bi().await {
+                let session = self.clone();
+                tokio::spawn(async move {
+                    let mut kind = [0u8; 1];
+                    if recv.read_exact(&mut kind).await.is_err() {
+                        return;
+                    }
+                    match kind[0] {
+                        STREAM_MINECRAFT => {
+                            let port = session.welcome.game_port;
+                            if let Ok(tcp) = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await {
+                                pipe(tcp, send, recv).await;
+                            }
+                        }
+                        STREAM_TCP_PORT => {
+                            let mut port = [0u8; 2];
+                            if recv.read_exact(&mut port).await.is_err() {
+                                return;
+                            }
+                            let port = u16::from_be_bytes(port);
+                            if !session.allowed_port(false, port) {
+                                return;
+                            }
+                            if let Ok(tcp) = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await {
+                                pipe(tcp, send, recv).await;
+                            }
+                        }
+                        STREAM_SKINS => {
+                            if let Some(hub) = &session.hub {
+                                hub.serve(send, recv).await;
+                            }
+                        }
+                        STREAM_MOD_FILE => session.send_mod(send, recv).await,
+                        _ => {}
+                    }
+                });
+            }
+        };
+        tokio::select! {
+            () = datagrams => {}
+            () = streams => {}
+        }
+        (self.on_event)(HostEvent::Left { friend });
     }
-    on_event(HostEvent::Left { friend });
+
+    /// Send one mod jar from the manifest: `u64` length, then the bytes (`u64::MAX` = no).
+    async fn send_mod(&self, mut send: SendStream, mut recv: RecvStream) {
+        let mut sha1 = [0u8; 40];
+        if recv.read_exact(&mut sha1).await.is_err() {
+            return;
+        }
+        let sha1 = String::from_utf8_lossy(&sha1).to_string();
+        let file = match (&self.welcome.manifest, &self.mods_dir) {
+            (Some(manifest), Some(dir)) => crate::modsync::file_for(manifest, dir, &sha1),
+            _ => None,
+        };
+        let bytes = match file {
+            Some(path) => tokio::fs::read(path).await.ok(),
+            None => None,
+        };
+        let _ = match bytes {
+            Some(bytes) => {
+                let _ = send.write_all(&(bytes.len() as u64).to_be_bytes()).await;
+                send.write_all(&bytes).await
+            }
+            None => send.write_all(&u64::MAX.to_be_bytes()).await,
+        };
+        let _ = send.finish();
+        // Let the friend read everything before the stream goes away.
+        let _ = tokio::time::timeout(Duration::from_secs(600), send.stopped()).await;
+    }
+}
+
+/// A datagram is `[port: u16 big-endian][payload]`, `port` being the host's UDP port.
+fn split_datagram(datagram: &[u8]) -> Option<(u16, &[u8])> {
+    let (port, payload) = datagram.split_at_checked(2)?;
+    Some((u16::from_be_bytes([port[0], port[1]]), payload))
+}
+
+fn make_datagram(port: u16, payload: &[u8]) -> bytes::Bytes {
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    out.extend_from_slice(&port.to_be_bytes());
+    out.extend_from_slice(payload);
+    out.into()
+}
+
+/// Host side of UDP forwarding: one local socket per port per friend, so replies find their
+/// way back to the right friend.
+#[derive(Clone, Default)]
+struct UdpRelay {
+    sockets: Arc<tokio::sync::Mutex<std::collections::HashMap<u16, Arc<UdpSocket>>>>,
+}
+
+impl UdpRelay {
+    async fn host_send(&self, conn: &Connection, port: u16, payload: &[u8]) {
+        let socket = {
+            let mut sockets = self.sockets.lock().await;
+            match sockets.get(&port) {
+                Some(s) => s.clone(),
+                None => {
+                    let Ok(socket) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await else {
+                        return;
+                    };
+                    if socket.connect((Ipv4Addr::LOCALHOST, port)).await.is_err() {
+                        return;
+                    }
+                    let socket = Arc::new(socket);
+                    sockets.insert(port, socket.clone());
+                    // Replies from the mod go back to this friend.
+                    let (reply, conn) = (socket.clone(), conn.clone());
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 65_536];
+                        while let Ok(n) = reply.recv(&mut buf).await {
+                            if conn.send_datagram(make_datagram(port, &buf[..n])).is_err()
+                                && conn.close_reason().is_some()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                    socket
+                }
+            }
+        };
+        let _ = socket.send(payload).await;
+    }
 }
 
 /// Something the joiner's UI should show.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum JoinEvent {
     Connecting,
     /// Connected; waiting for the host to click Allow.
@@ -391,20 +587,68 @@ pub enum JoinEvent {
     /// In: Minecraft can connect to `localhost:port` (it's also in the LAN list).
     Ready {
         port: u16,
+        title: String,
+        /// Extra ports that couldn't be opened here (another program uses them).
+        blocked: Vec<ExtraPort>,
     },
+    /// The host plays with mods; [`ModSource`] fetches the ones Modrinth doesn't have.
+    Mods(Manifest, ModSource),
 }
 
-/// Join a friend's world until `stop` completes or the host ends it.
-/// With `skins`, our skins go to the host and everyone's come back.
+/// Fetches mod jars from the host during a session.
+#[derive(Clone)]
+pub struct ModSource(Connection);
+
+impl fmt::Debug for ModSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ModSource")
+    }
+}
+
+impl ModSource {
+    pub async fn fetch(&self, sha1: String) -> Result<Vec<u8>> {
+        let failed = |e: String| other(format!("couldn't get a mod from your friend: {e}"));
+        let (mut send, mut recv) = self.0.open_bi().await.map_err(|e| failed(e.to_string()))?;
+        let mut request = vec![STREAM_MOD_FILE];
+        request.extend_from_slice(sha1.as_bytes());
+        send.write_all(&request)
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+        let _ = send.finish();
+        let mut len = [0u8; 8];
+        recv.read_exact(&mut len)
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+        let len = u64::from_be_bytes(len);
+        if len > crate::modsync::MAX_MOD_SIZE {
+            return Err(failed("they don't have it any more".into()));
+        }
+        let mut bytes = vec![0u8; len as usize];
+        recv.read_exact(&mut bytes)
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+        Ok(bytes)
+    }
+}
+
+/// Join a friend's world until `stop` completes or the host ends it. With `skins`, our
+/// skins go to the host and everyone's come back. `via` is this computer's friends endpoint
+/// (see [`crate::friends`]): joining through it lets a friend's netherNode recognise us and
+/// let us in without asking. `None` joins anonymously.
 pub async fn join(
     code: &JoinCode,
     name: &str,
     skins: Option<SkinStore>,
+    via: Option<Endpoint>,
     on_event: impl Fn(JoinEvent) + Send + Sync + 'static,
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     on_event(JoinEvent::Connecting);
-    let endpoint = bind().await?;
+    let owned = via.is_none();
+    let endpoint = match via {
+        Some(endpoint) => endpoint,
+        None => bind(None).await?,
+    };
     let conn = tokio::time::timeout(Duration::from_secs(45), endpoint.connect(code.host, ALPN))
         .await
         .map_err(|_| {
@@ -433,25 +677,105 @@ pub async fn join(
         Ok(Err(_)) => return Err(other("your friend declined, or the code is wrong")),
         Err(_) => return Err(other("your friend didn't answer in time")),
     }
+    let welcome: Welcome = read_frame(&mut control_recv)
+        .await
+        .and_then(|f| serde_json::from_slice(&f).ok())
+        .unwrap_or_default();
 
-    // Listen on all interfaces so the LAN-list entry (which uses this computer's LAN address)
-    // works, but only accept connections coming from this same computer.
     let skin_sync = match skins {
         Some(store) => tokio::spawn(exchange_skins(conn.clone(), store)),
         None => tokio::spawn(async {}),
     };
+    // Listen on all interfaces so the LAN-list entry (which uses this computer's LAN address)
+    // works, but only accept connections coming from this same computer.
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     let port = listener.local_addr()?.port();
-    on_event(JoinEvent::Ready { port });
 
-    let announce = announce_on_lan(name, port);
+    // UDP on the game port's number (as the host has it) plus extra ports.
+    let mut blocked = Vec::new();
+    let mut udp: std::collections::HashMap<u16, Arc<JoinerUdp>> = Default::default();
+    if let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await {
+        udp.insert(welcome.game_port, Arc::new(JoinerUdp::new(socket)));
+    }
+    let mut tcp_extra = Vec::new();
+    for extra in &welcome.extra_ports {
+        if extra.udp {
+            match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, extra.port)).await {
+                Ok(socket) => {
+                    udp.insert(extra.port, Arc::new(JoinerUdp::new(socket)));
+                }
+                Err(_) => blocked.push(*extra),
+            }
+        } else {
+            match TcpListener::bind((Ipv4Addr::UNSPECIFIED, extra.port)).await {
+                Ok(listener) => tcp_extra.push((extra.port, listener)),
+                Err(_) => blocked.push(*extra),
+            }
+        }
+    }
+    let udp = Arc::new(udp);
+    on_event(JoinEvent::Ready {
+        port,
+        title: welcome.title.clone(),
+        blocked,
+    });
+    if let Some(manifest) = welcome.manifest.clone().filter(Manifest::is_modded) {
+        on_event(JoinEvent::Mods(manifest, ModSource(conn.clone())));
+    }
+
+    let mut tasks = Vec::new();
+    for (host_port, joiner) in udp.iter() {
+        let (joiner, conn, host_port) = (joiner.clone(), conn.clone(), *host_port);
+        tasks.push(tokio::spawn(async move {
+            joiner.uplink(&conn, host_port).await
+        }));
+    }
+    {
+        let (udp, conn) = (udp.clone(), conn.clone());
+        tasks.push(tokio::spawn(async move {
+            while let Ok(datagram) = conn.read_datagram().await {
+                if let Some((port, payload)) = split_datagram(&datagram)
+                    && let Some(joiner) = udp.get(&port)
+                {
+                    joiner.downlink(payload).await;
+                }
+            }
+        }));
+    }
+    for (extra_port, listener) in tcp_extra {
+        let conn = conn.clone();
+        tasks.push(tokio::spawn(async move {
+            while let Ok((tcp, peer)) = listener.accept().await {
+                if !is_this_computer(&tcp, peer) {
+                    continue;
+                }
+                let conn = conn.clone();
+                tokio::spawn(async move {
+                    let mut header = vec![STREAM_TCP_PORT];
+                    header.extend_from_slice(&extra_port.to_be_bytes());
+                    if let Ok((mut send, recv)) = conn.open_bi().await
+                        && send.write_all(&header).await.is_ok()
+                    {
+                        pipe(tcp, send, recv).await;
+                    }
+                });
+            }
+        }));
+    }
+
+    let lan_name = format!("{} (netherNode)", welcome.title.trim());
+    let lan_name = if welcome.title.trim().is_empty() {
+        name.to_string()
+    } else {
+        lan_name
+    };
+    let announce = announce_on_lan(&lan_name, port);
     tokio::pin!(stop, announce);
     let result = loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let Ok((tcp, peer)) = accepted else { continue };
-                let local = tcp.local_addr().map(|a| a.ip()).ok();
-                if !(peer.ip().is_loopback() || Some(peer.ip()) == local) {
+                if !is_this_computer(&tcp, peer) {
                     continue; // someone else on the LAN; this tunnel is only for us
                 }
                 let conn = conn.clone();
@@ -469,9 +793,93 @@ pub async fn join(
         }
     };
     skin_sync.abort();
+    for task in tasks {
+        task.abort();
+    }
     conn.close(0u32.into(), b"bye");
-    endpoint.close().await;
+    if owned {
+        endpoint.close().await;
+    }
     result
+}
+
+fn is_this_computer(tcp: &TcpStream, peer: SocketAddr) -> bool {
+    let local = tcp.local_addr().map(|a| a.ip()).ok();
+    peer.ip().is_loopback() || Some(peer.ip()) == local
+}
+
+/// Joiner side of one forwarded UDP port: packets from the game (or a mod) on this computer
+/// go to the host; replies come back to whoever sent last.
+struct JoinerUdp {
+    socket: UdpSocket,
+    peer: tokio::sync::Mutex<Option<SocketAddr>>,
+}
+
+impl JoinerUdp {
+    fn new(socket: UdpSocket) -> Self {
+        Self {
+            socket,
+            peer: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn uplink(&self, conn: &Connection, host_port: u16) {
+        let mut buf = vec![0u8; 65_536];
+        while let Ok((n, from)) = self.socket.recv_from(&mut buf).await {
+            if !from.ip().is_loopback() && !is_local_ip(from.ip()) {
+                continue;
+            }
+            *self.peer.lock().await = Some(from);
+            let _ = conn.send_datagram(make_datagram(host_port, &buf[..n]));
+        }
+    }
+
+    async fn downlink(&self, payload: &[u8]) {
+        if let Some(peer) = *self.peer.lock().await {
+            let _ = self.socket.send_to(payload, peer).await;
+        }
+    }
+}
+
+/// Whether `ip` belongs to this computer (a UDP sender has no "local address" to compare).
+fn is_local_ip(ip: std::net::IpAddr) -> bool {
+    std::net::UdpSocket::bind((ip, 0)).is_ok()
+}
+
+/// Ports that mods in this game or server folder listen on besides Minecraft's, read from
+/// their configs. Today: Simple Voice Chat (UDP, 24454 by default; `-1` means it shares the
+/// game port, which is always forwarded anyway).
+pub fn detect_mod_ports(dir: &std::path::Path, game_port: u16) -> Vec<ExtraPort> {
+    let mut ports = Vec::new();
+    let has_mod = |needle: &str| {
+        std::fs::read_dir(dir.join("mods"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains(needle)
+            })
+    };
+    let config = dir.join("config/voicechat/voicechat-server.properties");
+    let configured = std::fs::read_to_string(&config).ok().and_then(|text| {
+        text.lines()
+            .filter_map(|l| l.split_once('='))
+            .find(|(k, _)| k.trim() == "port")
+            .and_then(|(_, v)| v.trim().parse::<i32>().ok())
+    });
+    let voice = match configured {
+        Some(port) if port > 0 => u16::try_from(port).ok(),
+        Some(_) => None, // same as the game port
+        None if has_mod("voicechat") => Some(24454),
+        None => None,
+    };
+    if let Some(port) = voice.filter(|p| *p != game_port) {
+        ports.push(ExtraPort { udp: true, port });
+    }
+    ports
 }
 
 /// Advertise the tunnel to Minecraft's LAN discovery every 1.5 s, like a real LAN world.
@@ -548,6 +956,42 @@ fn lan_listener() -> std::io::Result<UdpSocket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_voice_chat_ports() {
+        let dir = std::env::temp_dir().join(format!("nethernode-ports-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("mods")).unwrap();
+        assert!(detect_mod_ports(&dir, 25565).is_empty());
+        std::fs::write(dir.join("mods/voicechat-fabric-1.21.1-2.5.0.jar"), b"").unwrap();
+        assert_eq!(
+            detect_mod_ports(&dir, 25565),
+            [ExtraPort {
+                udp: true,
+                port: 24454
+            }]
+        );
+        std::fs::create_dir_all(dir.join("config/voicechat")).unwrap();
+        std::fs::write(
+            dir.join("config/voicechat/voicechat-server.properties"),
+            "port=24500\n",
+        )
+        .unwrap();
+        assert_eq!(
+            detect_mod_ports(&dir, 25565),
+            [ExtraPort {
+                udp: true,
+                port: 24500
+            }]
+        );
+        std::fs::write(
+            dir.join("config/voicechat/voicechat-server.properties"),
+            "port=-1\n",
+        )
+        .unwrap();
+        assert!(detect_mod_ports(&dir, 25565).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn reads_lan_announcements() {

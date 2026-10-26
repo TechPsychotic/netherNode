@@ -305,13 +305,20 @@ pub fn agent_args(injector: &Path, port: u16) -> Vec<String> {
     ]
 }
 
-/// Aborts the spawned skin service when dropped (when the game exits).
-pub struct AbortOnDrop(pub tokio::task::JoinHandle<()>);
+/// The skin service shared by every game and server this process starts, once running.
+static SERVICE: tokio::sync::Mutex<Option<u16>> = tokio::sync::Mutex::const_new(None);
 
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
+/// The port of the local skin service, starting it on first use. It then runs for as long
+/// as this process (games and servers come and go; the service stays for the others).
+pub async fn ensure_service(paths: &Paths) -> Result<u16> {
+    let mut running = SERVICE.lock().await;
+    if let Some(port) = *running {
+        return Ok(port);
     }
+    let (port, run) = serve(paths).await?;
+    tokio::spawn(run);
+    *running = Some(port);
+    Ok(port)
 }
 
 /// Start the local skin service on a free port. Spawn the returned future (it runs forever).

@@ -2,7 +2,7 @@
 //! `inheritsFrom` the vanilla version, so the normal launch path handles them.
 
 mod fabric;
-mod forge;
+pub(crate) mod forge;
 pub mod optifine;
 
 use serde::{Deserialize, Serialize};

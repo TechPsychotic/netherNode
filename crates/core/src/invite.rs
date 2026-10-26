@@ -84,8 +84,14 @@ impl ShortCode {
     }
 
     fn key(&self) -> SecretKey {
+        self.key_for("nethernode/short-invite/1")
+    }
+
+    /// The lookup key for these words in `domain` (invites and friend codes don't overlap).
+    pub(crate) fn key_for(&self, domain: &str) -> SecretKey {
         let mut hash = Sha256::new();
-        hash.update(b"nethernode/short-invite/1\0");
+        hash.update(domain.as_bytes());
+        hash.update(b"\0");
         hash.update(self.to_string().as_bytes());
         SecretKey::from_bytes(&hash.finalize().into())
     }
@@ -97,8 +103,17 @@ pub(crate) async fn publish(
     short: &ShortCode,
     code: &JoinCode,
 ) -> Result<()> {
-    let key = short.key();
-    let packet = SignedPacket::from_txt_strings(&key, RECORD, [code.to_string()], 3600)
+    publish_record(http, &short.key(), RECORD, &code.to_string()).await
+}
+
+/// Publish `value` as a TXT record `record`, signed with `key`, on the lookup service.
+pub(crate) async fn publish_record(
+    http: &reqwest::Client,
+    key: &SecretKey,
+    record: &str,
+    value: &str,
+) -> Result<()> {
+    let packet = SignedPacket::from_txt_strings(key, record, [value], 3600)
         .map_err(|e| other(format!("couldn't make a short code: {e}")))?;
     http.put(format!("{RELAY}/{}", key.public().to_z32()))
         .body(packet.to_relay_payload())
@@ -110,11 +125,12 @@ pub(crate) async fn publish(
     Ok(())
 }
 
-/// Look up the full code behind a short one.
-async fn lookup(http: &reqwest::Client, short: &ShortCode) -> Result<JoinCode> {
-    let public = short.key().public();
-    let not_found =
-        || other("no one is sharing with that code right now; check the words with your friend");
+/// The TXT values of `record` published under `public`; empty if nothing is published.
+pub(crate) async fn lookup_record(
+    http: &reqwest::Client,
+    public: &iroh::PublicKey,
+    record: &str,
+) -> Result<Vec<String>> {
     let response = http
         .get(format!("{RELAY}/{}", public.to_z32()))
         .timeout(Duration::from_secs(15))
@@ -122,15 +138,23 @@ async fn lookup(http: &reqwest::Client, short: &ShortCode) -> Result<JoinCode> {
         .await
         .map_err(|e| other(format!("couldn't look up the code: {e}")))?;
     if !response.status().is_success() {
-        return Err(not_found());
+        return Ok(Vec::new());
     }
     let payload = response
         .bytes()
         .await
         .map_err(|e| other(format!("couldn't look up the code: {e}")))?;
-    let packet = SignedPacket::from_relay_payload(&public, &payload).map_err(|_| not_found())?;
-    packet
-        .txt_records(RECORD)
+    Ok(SignedPacket::from_relay_payload(public, &payload)
+        .map(|p| p.txt_records(record))
+        .unwrap_or_default())
+}
+
+/// Look up the full code behind a short one.
+async fn lookup(http: &reqwest::Client, short: &ShortCode) -> Result<JoinCode> {
+    let not_found =
+        || other("no one is sharing with that code right now; check the words with your friend");
+    lookup_record(http, &short.key().public(), RECORD)
+        .await?
         .iter()
         .find_map(|t| t.parse().ok())
         .ok_or_else(not_found)

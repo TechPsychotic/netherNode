@@ -29,7 +29,10 @@
 
 **Together**
 - **Play with friends over the internet.** Open your world to LAN, click *Invite friends*, and read out the four-word code (like `maple-orbit-tunnel-frog`). Your friend clicks *Join friend*, types it, and finds your world in Minecraft's LAN list. No port forwarding, works behind CGNAT, end-to-end encrypted, and you approve every friend.
-- **Host a server on your PC:** Vanilla, Fabric (mods) or Paper (plugins), with a live console, settings and a whitelist. Friends can join any time it's running, even when you're not playing.
+- **Friends list.** Add friends once with a four-word friend code. You see who's online and what they're sharing, and join with one click: no codes, no Allow prompts.
+- **Modded multiplayer that just works.** When you join a friend who plays with mods, netherNode offers *Get the same mods*: the same loader and mods, from Modrinth or straight from your friend.
+- **Host servers on your PC:** Vanilla, Fabric, Forge, NeoForge (mods) or Paper (plugins), several at once, each with its own code. Make one from an instance to bring its mods along. Live console, every `server.properties` setting, a whitelist, and skins. Your servers appear in Minecraft's Multiplayer list.
+- **Voice chat and other mod ports** (like Simple Voice Chat's UDP port) travel through the same tunnel.
 - **Desktop notifications** when a friend wants in or your server is ready, so you notice even in fullscreen.
 
 **Your stuff**
@@ -84,10 +87,12 @@ The builds aren't code-signed yet:
 4. Your friend opens **Multiplayer**; your world is in the LAN list. They can also Direct Connect to the `localhost` address netherNode shows them.
 
 **A server, even when you're not playing**
-1. **Servers → + New server**: name, Minecraft version, Vanilla / Fabric / Paper. Accept the Minecraft EULA.
-2. **Start** it. When it's ready, **Invite friends** works just like above, and **Play on it** puts you in too.
+1. **Servers → + New server**: name, Minecraft version, Vanilla / Fabric / Forge / NeoForge / Paper, or *Based on an instance* to copy its version, loader and mods. Accept the Minecraft EULA.
+2. **Start** it. When it's ready, **Invite friends** works just like above. To play on it yourself, open Minecraft's **Multiplayer** list: it's there as "*name* (this PC)".
 
-Both use the same Minecraft version on both sides; with mods, friends need the same mods.
+**Friends list:** **Friends → Show my friend code**, and your friend types it under **Add a friend**. Once they accept, each of you sees when the other is online and what they're sharing, with a **Join** button.
+
+**Mods:** both sides need the same Minecraft version and mods. When you join a modded world or server, click **Get the same mods** and netherNode makes a matching instance, then **Play it**.
 
 **How it works:** netherNode uses [iroh](https://iroh.computer). Both computers connect outwards and punch a direct path through NAT when they can; otherwise traffic goes through a relay over HTTPS that only sees encrypted data. The four words unlock the full code (the host's id and a random secret) through iroh's public lookup service, you approve each friend, and only the Minecraft port is reachable. **Copy full code** gives the long form, which works without the lookup.
 
@@ -142,6 +147,8 @@ Pushing a `v*` tag builds Windows, macOS and Linux releases through GitHub Actio
 
 ## FAQ
 
+**A mod needs another port (voice chat).** netherNode finds Simple Voice Chat's port by itself. For other mods, add the port in the server's settings (*Extra ports*, e.g. `UDP 24454`). Friends get it through the same tunnel.
+
 **Can I join online-mode servers?** No. Offline accounts work in singleplayer, LAN, servers in offline mode (like the ones netherNode hosts), and friends' worlds through *Join friend*.
 
 **Is a server in offline mode safe?** It can't check names, so anyone who gets in could use any name. netherNode only lets in friends you approve, and you can turn on a whitelist in the server's settings.
@@ -150,11 +157,11 @@ Pushing a `v*` tag builds Windows, macOS and Linux releases through GitHub Actio
 
 **How do skins work without a login?** netherNode runs a small skin service on your own computer and starts the game with [authlib-injector](https://github.com/yushijinhun/authlib-injector), which sends the game's skin lookups there instead of to Mojang. authlib-injector is open source (AGPL-3.0); netherNode downloads it once from its official site and checks its checksum. Turn skins off in **Settings** if you prefer.
 
-**My friend sees me with a default skin.** Both of you need netherNode 1.1 or newer with skins on (Settings), and your friend has to join through *Join friend*, which is how your skin reaches them. Players on servers hosted in netherNode get default skins for now, because those servers run in offline mode.
+**My friend sees me with a default skin.** Both of you need netherNode 1.2 or newer with skins on (Settings), and your friend has to join through *Join friend* or your friends list, which is how your skin reaches them. On servers hosted in netherNode, skins are on by default (server settings → *Show players' skins*).
 
 **Join friend says no one is sharing with that code.** Check the four words with your friend; spaces or dashes between them both work, and the first four letters of each word are enough. The words only work while your friend is sharing; a new session gives new words. If the lookup service can't be reached, ask your friend for **Copy full code** and paste that instead.
 
-**Can friends who don't use netherNode join me?** Your server, yes, if they can reach it (for example on your LAN, or with your own port forwarding): it runs in offline mode. *Invite friends* over the internet needs netherNode on both sides.
+**Can friends who don't use netherNode join me?** Your server, yes, if they can reach it (on your LAN, or with your own port forwarding) and you turn off *Show players' skins* in its settings. *Invite friends* over the internet needs netherNode on both sides.
 
 **My computer has little RAM. Will it run?** Yes. netherNode sizes the game's memory to what your computer has and what's free, gives low-RAM machines lighter game settings, and uses a lighter launcher renderer at 4 GB or less. Close other programs before a big modpack, and see the crash message if the game runs out of memory.
 

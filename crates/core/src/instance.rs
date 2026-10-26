@@ -122,6 +122,27 @@ impl Instance {
         Ok(())
     }
 
+    /// Rename an instance (its folder too). Names are unique, ignoring case, since Windows
+    /// and macOS folders are case-insensitive.
+    pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<Self> {
+        let new = new.trim();
+        validate_name(new)?;
+        let mut instance = Self::load(paths, old)?;
+        if new == old {
+            return Ok(instance);
+        }
+        let taken = Self::list(paths)?
+            .iter()
+            .any(|i| i.name != old && i.name.eq_ignore_ascii_case(new));
+        if taken || (!new.eq_ignore_ascii_case(old) && paths.instances().join(new).exists()) {
+            return Err(other(format!("an instance named '{new}' already exists")));
+        }
+        std::fs::rename(paths.instances().join(old), paths.instances().join(new))?;
+        instance.name = new.to_string();
+        instance.save(paths)?;
+        Ok(instance)
+    }
+
     pub fn create(paths: &Paths, name: &str, version: &str, low_end: bool) -> Result<Self> {
         let instance = Self::new(name, version)?;
         if instance.dir(paths).exists() {
@@ -235,6 +256,24 @@ impl Installing {
 #[cfg(test)]
 mod tests {
     use super::{Instance, Paths, validate_name};
+
+    #[test]
+    fn rename_keeps_names_unique() {
+        let root = std::env::temp_dir().join(format!("nethernode-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths::new(&root);
+        Instance::create(&paths, "One", "1.21.1", false).unwrap();
+        Instance::create(&paths, "Two", "1.21.1", false).unwrap();
+        assert!(Instance::rename(&paths, "One", "two").is_err());
+        assert!(Instance::rename(&paths, "One", "bad/name").is_err());
+        let renamed = Instance::rename(&paths, "One", "Survival").unwrap();
+        assert_eq!(renamed.name, "Survival");
+        assert!(Instance::load(&paths, "Survival").is_ok());
+        assert!(Instance::load(&paths, "One").is_err());
+        // Changing only the case is allowed.
+        assert!(Instance::rename(&paths, "Survival", "survival").is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn names_valid_on_every_os() {

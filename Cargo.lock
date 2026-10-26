@@ -553,6 +553,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "byteorder-lite"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1462,6 +1468,18 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
+]
+
+[[package]]
+name = "fastnbt"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9dcc36fee27b17c9c183294d6e739cf218b01ce0fc545c31d8be3913d961731"
+dependencies = [
+ "byteorder",
+ "cesu8",
+ "serde",
+ "serde_bytes",
 ]
 
 [[package]]
@@ -3326,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "nethernode"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3338,10 +3356,12 @@ dependencies = [
 
 [[package]]
 name = "nethernode-core"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "directories",
+ "fastnbt",
  "futures",
  "getrandom 0.4.3",
  "hex",
@@ -3366,7 +3386,7 @@ dependencies = [
 
 [[package]]
 name = "nethernode-gui"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "futures",
  "iced",

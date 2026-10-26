@@ -37,6 +37,54 @@ pub struct LaunchCommand {
     pub main_class_at: usize,
     /// authlib-injector's jar and the data folder whose skins to serve, when skins are on.
     pub skins: Option<(PathBuf, Paths)>,
+    /// Java's major version, if known (argument files need Java 9+).
+    pub java_major: Option<u32>,
+}
+
+/// Windows refuses command lines longer than 32,767 characters ("The filename or extension
+/// is too long"), which big modpacks' classpaths exceed. Stay well below it.
+const MAX_COMMAND_LINE: usize = 24_000;
+
+/// How to pass the arguments when the command line would be too long.
+#[derive(Debug, PartialEq, Eq)]
+enum LongCommand {
+    /// Short enough: pass as is.
+    Direct,
+    /// Java 9+: put every argument in a file and pass `@file`.
+    ArgFile(String),
+    /// Java 8: move the classpath to the CLASSPATH variable (it has its own limit).
+    ClasspathEnv {
+        args: Vec<String>,
+        classpath: String,
+    },
+}
+
+fn fit_command_line(args: &[String], java_major: Option<u32>, limit: usize) -> LongCommand {
+    let length: usize = args.iter().map(|a| a.len() + 3).sum();
+    if length <= limit {
+        return LongCommand::Direct;
+    }
+    if java_major.is_some_and(|m| m >= 9) {
+        // One argument per line, quoted; Java's argument files treat \ as an escape.
+        let file = args
+            .iter()
+            .map(|a| format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return LongCommand::ArgFile(file);
+    }
+    match args.iter().position(|a| a == "-cp" || a == "-classpath") {
+        Some(i) if i + 1 < args.len() => {
+            let mut rest = args.to_vec();
+            let classpath = rest.remove(i + 1);
+            rest.remove(i);
+            LongCommand::ClasspathEnv {
+                args: rest,
+                classpath,
+            }
+        }
+        _ => LongCommand::Direct,
+    }
 }
 
 impl LaunchCommand {
@@ -50,10 +98,35 @@ impl LaunchCommand {
 
     pub fn to_command(&self) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(&self.java);
+        let limit = if std::env::var_os("NETHERNODE_FORCE_ARGFILE").is_some() {
+            0 // diagnostics: exercise the long-command path anywhere
+        } else if cfg!(windows) {
+            MAX_COMMAND_LINE
+        } else {
+            1_000_000
+        };
+        match fit_command_line(&self.args, self.java_major, limit) {
+            LongCommand::Direct => {
+                cmd.args(&self.args);
+            }
+            LongCommand::ArgFile(contents) => {
+                // Next to the game folder, so it's per instance and never in the way.
+                let file = self.cwd.with_file_name("launch-args.txt");
+                match std::fs::write(&file, contents) {
+                    Ok(()) => {
+                        cmd.arg(format!("@{}", file.display()));
+                    }
+                    Err(_) => {
+                        cmd.args(&self.args);
+                    }
+                }
+            }
+            LongCommand::ClasspathEnv { args, classpath } => {
+                cmd.args(args).env("CLASSPATH", classpath);
+            }
+        }
         // If the launcher goes away, the game goes with it instead of lingering unseen.
-        cmd.args(&self.args)
-            .current_dir(&self.cwd)
-            .kill_on_drop(true);
+        cmd.current_dir(&self.cwd).kill_on_drop(true);
         // Without this, a GUI launcher (no console of its own) would pop up a console window.
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -96,13 +169,11 @@ pub async fn run(
         on_line(line);
     };
 
-    // Skins: start the local skin service for as long as the game runs.
-    let mut service = None;
+    // Skins: point the game at the local skin service (started on first use).
     let with_skins;
     let cmd = match &cmd.skins {
-        Some((injector, paths)) => match crate::skins::serve(paths).await {
-            Ok((port, serve)) => {
-                service = Some(crate::skins::AbortOnDrop(tokio::spawn(serve)));
+        Some((injector, paths)) => match crate::skins::ensure_service(paths).await {
+            Ok(port) => {
                 let mut c = cmd.clone();
                 c.add_jvm_args(crate::skins::agent_args(injector, port));
                 with_skins = c;
@@ -123,7 +194,6 @@ pub async fn run(
         },
         None => cmd,
     };
-    let _service = service;
 
     let mut child = cmd
         .to_command()
@@ -205,7 +275,7 @@ pub async fn prepare(
         component: Some("jre-legacy".into()),
         major_version: 8,
     });
-    let java = match &instance.java_path {
+    let (java, java_major) = match &instance.java_path {
         Some(path) => {
             // A too-old Java fails with confusing "Unrecognized VM option" errors; say it plainly.
             match java::major_version(path) {
@@ -218,7 +288,7 @@ pub async fn prepare(
                         path.display()
                     )));
                 }
-                Some(_) => {}
+                Some(found) => (path.clone(), Some(found)),
                 None => {
                     return Err(crate::error::other(format!(
                         "the Java set for this instance ({}) could not be run",
@@ -226,14 +296,14 @@ pub async fn prepare(
                     )));
                 }
             }
-            path.clone()
         }
         None => {
             let runtime = java::resolve(&http, paths, &env, &required, progress).await?;
             if let Some(arch) = runtime.arch {
                 env.arch = arch;
             }
-            runtime.java
+            // Mojang's runtime for this version is exactly the major version it asks for.
+            (runtime.java, Some(required.major_version))
         }
     };
 
@@ -300,6 +370,7 @@ pub async fn prepare(
         heap,
         main_class_at,
         skins,
+        java_major,
     })
 }
 
@@ -518,6 +589,34 @@ fn build_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_command_lines_use_an_argument_file_or_classpath_variable() {
+        let args: Vec<String> = vec![
+            "-Xmx2G".into(),
+            "-cp".into(),
+            "C:\\libs\\a.jar;C:\\libs\\b \"c\".jar".into(),
+            "net.minecraft.Main".into(),
+        ];
+        assert_eq!(
+            fit_command_line(&args, Some(21), 10_000),
+            LongCommand::Direct
+        );
+        let LongCommand::ArgFile(file) = fit_command_line(&args, Some(21), 10) else {
+            panic!("expected an argument file");
+        };
+        assert_eq!(
+            file.lines().nth(2).unwrap(),
+            "\"C:\\\\libs\\\\a.jar;C:\\\\libs\\\\b \\\"c\\\".jar\""
+        );
+        assert_eq!(
+            fit_command_line(&args, Some(8), 10),
+            LongCommand::ClasspathEnv {
+                args: vec!["-Xmx2G".into(), "net.minecraft.Main".into()],
+                classpath: args[2].clone(),
+            }
+        );
+    }
 
     #[test]
     fn substitutes_placeholders() {

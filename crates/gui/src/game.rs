@@ -145,35 +145,38 @@ pub type JoinReply = Arc<std::sync::Mutex<Option<oneshot::Sender<bool>>>>;
 pub enum ShareEvent {
     /// The code to show (four words when possible) and the full code.
     Ready(String, String),
-    /// A friend with the right code is asking to join; answer through the sender.
-    Request(String, JoinReply),
+    /// Someone with the right code is asking to join: their short name, their netherNode id
+    /// (to let friends in automatically) and where to answer.
+    Request(String, String, JoinReply),
     Joined(String),
     Left(String),
     Ended(Result<(), String>),
 }
 
-/// Share a world opened to LAN on `port` until `stop` fires.
+/// Share a Minecraft port until `stop` fires. `options` is prepared first (it may look up
+/// mods on Modrinth).
 pub fn host_share(
-    paths: Paths,
-    port: u16,
+    options: impl std::future::Future<Output = nethernode_core::share::HostOptions> + Send + 'static,
     stop: oneshot::Receiver<()>,
 ) -> impl Stream<Item = ShareEvent> {
     use nethernode_core::share::{self, HostEvent};
     let (tx, rx) = mpsc::unbounded();
     let events = tx.clone();
     let run = async move {
+        let options = options.await;
         let result = share::host(
-            port,
-            nethernode_core::skins::for_sharing(&paths),
+            options,
             move |event| {
                 let event = match event {
                     HostEvent::Ready { code, short } => ShareEvent::Ready(
                         short.map_or_else(|| code.to_string(), |s| s.to_string()),
                         code.to_string(),
                     ),
-                    HostEvent::Request { friend, reply } => {
-                        ShareEvent::Request(friend, Arc::new(std::sync::Mutex::new(Some(reply))))
-                    }
+                    HostEvent::Request { friend, id, reply } => ShareEvent::Request(
+                        friend,
+                        id.to_z32(),
+                        Arc::new(std::sync::Mutex::new(Some(reply))),
+                    ),
                     HostEvent::Joined { friend } => ShareEvent::Joined(friend),
                     HostEvent::Left { friend } => ShareEvent::Left(friend),
                 };
@@ -194,10 +197,12 @@ pub enum JoinUpdate {
     Ended(Result<(), String>),
 }
 
-/// Join a friend's world until `stop` fires or the host ends it.
+/// Join a friend's world until `stop` fires or the host ends it. `via` is the friends
+/// endpoint, so a friend's netherNode lets us in without asking.
 pub fn join_share(
     paths: Paths,
     code: String,
+    via: Option<nethernode_core::friends::Endpoint>,
     stop: oneshot::Receiver<()>,
 ) -> impl Stream<Item = JoinUpdate> {
     let (tx, rx) = mpsc::unbounded();
@@ -209,6 +214,7 @@ pub fn join_share(
                 &code,
                 "Friend's world (netherNode)",
                 nethernode_core::skins::for_sharing(&paths),
+                via,
                 move |event| {
                     let _ = events.unbounded_send(JoinUpdate::Status(event));
                 },
@@ -220,6 +226,26 @@ pub fn join_share(
         let _ = tx.unbounded_send(JoinUpdate::Ended(result.map_err(|e| e.to_string())));
     };
     stream::select(rx, stream::once(run).filter_map(|()| async { None }))
+}
+
+/// Make an instance with a friend's mods, reporting progress like other jobs.
+pub fn get_friend_mods(
+    paths: Paths,
+    manifest: nethernode_core::modsync::Manifest,
+    source: nethernode_core::share::ModSource,
+    name: String,
+) -> impl Stream<Item = JobEvent> {
+    job(move |progress| async move {
+        let http = nethernode_core::download::client();
+        let fetch = |sha1: String| {
+            let source = source.clone();
+            async move { source.fetch(sha1).await }
+        };
+        nethernode_core::modsync::create_instance(&http, &paths, &manifest, &name, fetch, &progress)
+            .await
+            .map(|i| format!("{} is ready with your friend's mods", i.name))
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Progress and output of a server hosted on this PC.
@@ -282,6 +308,32 @@ pub fn run_server(
         }
         .await;
         let _ = tx.unbounded_send(ServerUpdate::Ended(result));
+    };
+    stream::select(rx, stream::once(run).filter_map(|()| async { None }))
+}
+
+/// The permanent-friends service's events.
+#[derive(Debug, Clone)]
+pub enum FriendsUpdate {
+    Started(nethernode_core::friends::Friends),
+    Failed(String),
+    /// The list or someone's presence changed.
+    Changed,
+}
+
+/// Start the friends service and report changes for as long as the app runs.
+pub fn friends_service(paths: Paths, name: String) -> impl Stream<Item = FriendsUpdate> {
+    let (tx, rx) = mpsc::unbounded();
+    let changes = tx.clone();
+    let run = async move {
+        let started = nethernode_core::friends::Friends::start(&paths, &name, move || {
+            let _ = changes.unbounded_send(FriendsUpdate::Changed);
+        })
+        .await;
+        let _ = tx.unbounded_send(match started {
+            Ok(friends) => FriendsUpdate::Started(friends),
+            Err(e) => FriendsUpdate::Failed(e.to_string()),
+        });
     };
     stream::select(rx, stream::once(run).filter_map(|()| async { None }))
 }
