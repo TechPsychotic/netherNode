@@ -139,6 +139,8 @@ pub struct App {
     shares: Vec<HostShare>,
     /// Permanent friends, once the service has started.
     friends: Option<nethernode_core::friends::Friends>,
+    /// Why the friends service isn't running, if it failed (it retries).
+    friends_error: Option<String>,
     servers: Vec<nethernode_core::server::Server>,
     server_runs: HashMap<String, ServerRun>,
     /// Server downloads in progress, by server name.
@@ -552,6 +554,7 @@ pub enum Message {
     GetFriendMods,
     Friends(game::FriendsUpdate),
     ShowFriends,
+    RetryFriends,
     FriendCodeInput(String),
     AddFriend,
     FriendAdded(Result<String, String>),
@@ -681,6 +684,7 @@ impl App {
             loader_support: HashMap::new(),
             shares: Vec::new(),
             friends: None,
+            friends_error: None,
             servers: nethernode_core::server::Server::list(&paths),
             server_runs: HashMap::new(),
             server_jobs: HashMap::new(),
@@ -1890,14 +1894,31 @@ impl App {
             Message::Friends(update) => match update {
                 game::FriendsUpdate::Started(friends) => {
                     self.friends = Some(friends);
+                    self.friends_error = None;
                     self.update_friend_sharing();
                 }
                 game::FriendsUpdate::Failed(e) => {
-                    eprintln!("friends are offline: {e}");
+                    self.friends_error = Some(e);
+                    // Try again in a while (no internet yet, a network change...).
+                    let paths = self.paths.clone();
+                    let me = self
+                        .accounts
+                        .default
+                        .clone()
+                        .unwrap_or_else(|| "Player".into());
+                    return Task::perform(
+                        tokio::time::sleep(std::time::Duration::from_secs(30)),
+                        |()| Message::RetryFriends,
+                    )
+                    .chain(Task::run(
+                        game::friends_service(paths, me),
+                        Message::Friends,
+                    ));
                 }
                 // The view reads the latest list; nothing to store.
                 game::FriendsUpdate::Changed => {}
             },
+            Message::RetryFriends => {}
             Message::ShowFriends => {
                 self.screen = Screen::Friends(FriendsView {
                     code: String::new(),

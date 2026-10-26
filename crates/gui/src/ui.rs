@@ -1349,20 +1349,31 @@ impl App {
             small_button("Done").on_press(Message::ShowHome),
         ]
         .align_y(Alignment::Center);
-        let Some(friends) = &self.friends else {
-            return column![
-                header,
-                text("Friends need an internet connection. netherNode keeps trying in the background.")
-                    .color(theme::MUTED),
-            ]
-            .spacing(16)
-            .into();
+        let ready = self.friends.is_some();
+        // Where the friends service stands, in one line.
+        let status: Element<'a, Message> = match (&self.friends, &self.friends_error) {
+            (Some(_), _) => text("● Connected: friends can see you while netherNode is open.")
+                .size(13)
+                .color(theme::SUCCESS)
+                .into(),
+            (None, Some(e)) => text(format!(
+                "Couldn't connect to the friends network ({e}). Trying again every 30 seconds; check your internet connection."
+            ))
+            .size(13)
+            .color(theme::WARNING)
+            .into(),
+            (None, None) => text("Connecting to the friends network… (this takes a few seconds after netherNode starts)")
+                .size(13)
+                .color(theme::MUTED)
+                .into(),
         };
-        let intro = text(
-            "Friends see when you're online and can join what you share (a world opened to LAN, or a server) with one click, without codes or Allow prompts.",
-        )
-        .size(13)
-        .color(theme::MUTED);
+        let how = column![
+            text("How it works").size(13).color(theme::MUTED),
+            text("1. Click Show my friend code and send your friend the four words (or read them out).").size(13),
+            text("2. Your friend types them under Add a friend on their netherNode. You get a request to accept.").size(13),
+            text("3. Done: you each see when the other is online, and anything they share (a world opened to LAN or a server) appears here with a Join button. Friends get in without codes or Allow prompts.").size(13),
+        ]
+        .spacing(4);
 
         let my_code: Element<'a, Message> = match &view.my_code {
             Some(code) => row![
@@ -1386,13 +1397,13 @@ impl App {
                 } else {
                     "Show my friend code"
                 })
-                .on_press_maybe((!view.busy).then_some(Message::MakeFriendCode)),
+                .on_press_maybe((ready && !view.busy).then_some(Message::MakeFriendCode)),
             ]
             .spacing(8)
             .align_y(Alignment::Center)
             .into(),
         };
-        let can_add = !view.code.trim().is_empty() && !view.busy;
+        let can_add = ready && !view.code.trim().is_empty() && !view.busy;
         let add = row![
             text_input(
                 "Their friend code, e.g. maple orbit tunnel frog",
@@ -1410,7 +1421,7 @@ impl App {
         .spacing(10);
 
         let mut list = column![].spacing(8);
-        let mut entries = friends.list();
+        let mut entries = self.friends.as_ref().map(|f| f.list()).unwrap_or_default();
         entries.sort_by_key(|(f, p)| (!p.online, f.name.to_lowercase()));
         if entries.is_empty() {
             list = list.push(text("No friends yet.").size(13).color(theme::MUTED));
@@ -1459,7 +1470,8 @@ impl App {
         }
         column![
             header,
-            intro,
+            status,
+            how,
             my_code,
             field("Add a friend", add),
             text("Your friends").size(13).color(theme::MUTED),
