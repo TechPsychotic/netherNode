@@ -325,15 +325,23 @@ pub async fn ensure_service(paths: &Paths) -> Result<u16> {
 pub async fn serve(
     paths: &Paths,
 ) -> Result<(u16, impl std::future::Future<Output = ()> + Send + 'static)> {
+    serve_on(paths, PORT).await
+}
+
+/// [`serve`] on `port` (0 for any free port, as tests do).
+async fn serve_on(
+    paths: &Paths,
+    preferred: u16,
+) -> Result<(u16, impl std::future::Future<Output = ()> + Send + 'static)> {
     let store = SkinStore::new(paths);
     let key = RsaPrivateKey::from_pkcs8_pem(SIGNING_KEY).map_err(|e| other(format!("key: {e}")))?;
     let public_pem = key
         .to_public_key()
         .to_public_key_pem(LineEnding::LF)
         .map_err(|e| other(format!("key: {e}")))?;
-    let listener = match TcpListener::bind(("127.0.0.1", PORT)).await {
+    let listener = match TcpListener::bind(("127.0.0.1", preferred)).await {
         Ok(listener) => listener,
-        Err(_) if already_serving(&public_pem).await => {
+        Err(_) if preferred == PORT && already_serving(&public_pem).await => {
             // Another game (or server) from this PC already runs it; share that one.
             return Ok((PORT, futures::future::Either::Left(std::future::pending())));
         }
@@ -739,7 +747,8 @@ mod tests {
         store
             .set_own_skin("Steve", &png(64, 64), Model::Slim)
             .unwrap();
-        let (port, run) = serve(&paths).await.unwrap();
+        // Its own port: a netherNode running on this PC may hold the usual one.
+        let (port, run) = serve_on(&paths, 0).await.unwrap();
         tokio::spawn(run);
         let http = reqwest::Client::new();
         let base = format!("http://127.0.0.1:{port}");
