@@ -188,6 +188,12 @@ enum ModsCmd {
         instance: String,
         project: String,
     },
+    /// List required mods that are missing; with --fix, install them from Modrinth
+    Check {
+        instance: String,
+        #[arg(long)]
+        fix: bool,
+    },
     /// Copy a mod jar into the instance
     AddFile {
         instance: String,
@@ -561,6 +567,36 @@ async fn main() -> Result<()> {
         Command::Mods(cmd) => {
             let http = download::client();
             match cmd {
+                ModsCmd::Check { instance, fix } => {
+                    let instance = Instance::load(&paths, &instance)?;
+                    if fix {
+                        let (installed, still) = nethernode_core::moddeps::install_missing(
+                            &http,
+                            &paths,
+                            &instance,
+                            &progress_bars(),
+                        )
+                        .await?;
+                        for name in installed {
+                            println!("installed {name}");
+                        }
+                        for m in still {
+                            println!(
+                                "still missing: {} (needed by {})",
+                                m.id,
+                                m.needed_by.join(", ")
+                            );
+                        }
+                    } else {
+                        let missing = nethernode_core::moddeps::missing(&instance.mods_dir(&paths));
+                        if missing.is_empty() {
+                            println!("no missing dependencies");
+                        }
+                        for m in missing {
+                            println!("missing: {} (needed by {})", m.id, m.needed_by.join(", "));
+                        }
+                    }
+                }
                 ModsCmd::List { instance } => {
                     let instance = Instance::load(&paths, &instance)?;
                     for m in mods::list(&paths, &instance)? {

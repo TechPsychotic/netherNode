@@ -15,6 +15,7 @@ pub mod launch;
 pub mod loader;
 pub mod log;
 pub mod memory;
+pub mod moddeps;
 pub mod modpack;
 pub mod mods;
 pub mod modsync;

@@ -111,12 +111,9 @@ pub fn move_dir(from: &Path, to: &Path) -> Result<()> {
     {
         return Ok(());
     }
-    let to_abs = if to.is_absolute() {
-        to.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(to)
-    };
-    if to_abs.starts_with(&from_c) {
+    // Resolve `to` the same way as `from` (on Windows canonical paths start with \\?\),
+    // through its nearest existing ancestor since it may not exist yet.
+    if resolve(to)?.starts_with(&from_c) {
         return Err(other("the new folder can't be inside the current one"));
     }
     if to.exists() && std::fs::read_dir(to)?.next().is_some() {
@@ -134,6 +131,29 @@ pub fn move_dir(from: &Path, to: &Path) -> Result<()> {
     copy_dir(from, to)?;
     std::fs::remove_dir_all(from)?;
     Ok(())
+}
+
+/// `path` made absolute and canonical as far as it exists, with the rest appended.
+fn resolve(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            return Ok(rest.iter().rev().fold(canonical, |p, part| p.join(part)));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return Ok(absolute),
+        }
+    }
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<()> {

@@ -1006,8 +1006,10 @@ mod tests {
         assert_eq!(lan_ad_port("[MOTD]x[/MOTD]"), None);
     }
 
-    /// Announces a fake world the way Minecraft does and finds it.
+    /// Announces a fake world the way Minecraft does and finds it. Needs multicast on the
+    /// loopback path, which some CI machines (GitHub's macOS runners) don't have.
     #[tokio::test]
+    #[cfg_attr(target_os = "macos", ignore)]
     async fn finds_a_world_opened_to_lan() {
         let world = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = world.local_addr().unwrap().port();

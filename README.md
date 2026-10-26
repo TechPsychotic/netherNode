@@ -25,6 +25,7 @@
 - **Mod loaders in one click:** Fabric, Quilt, Forge (including pre-1.13) and NeoForge. Loaders that haven't released for a version yet are greyed out.
 - **OptiFine, solved.** A one-click open-source alternative (Sodium, Iris shaders, connected textures, dynamic lights, zoom and more), or a real OptiFine jar.
 - **Mods from Modrinth**, filtered to what works with the instance, with dependencies installed automatically. Turn mods on and off, or drop `.jar` files onto the window.
+- **No more "requires mod X, which is missing".** Before a modded game starts, netherNode reads what each mod needs and installs anything missing from Modrinth.
 - **Modpacks** from Modrinth in one click, or import `.mrpack` files.
 
 **Together**

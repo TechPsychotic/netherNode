@@ -21,6 +21,7 @@
 - **Servers:** Forge and NeoForge servers; make a server from an instance (client-only mods are left out); run several at once, each with its own code; every `server.properties` setting; skins on servers.
 - **Your servers are in Minecraft's Multiplayer list** ("*name* (this PC)"), replacing *Play on it*.
 - **Voice chat and other mod ports:** UDP and extra ports go through the tunnel; Simple Voice Chat is found automatically.
+- **Missing mod dependencies:** before a modded game starts, netherNode reads what each mod needs and installs anything missing from Modrinth (also for jars you added yourself).
 - **Windows:** big modpacks no longer fail with "The filename or extension is too long".
 - **Instances:** rename in Edit (names stay unique); long names no longer push buttons off screen.
 - A **Home** button, and the instance's version now sits beside its dropdown.

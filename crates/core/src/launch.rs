@@ -307,6 +307,31 @@ pub async fn prepare(
         }
     };
 
+    // Mods that need other mods: fetch what's missing before the game complains.
+    if instance
+        .loader
+        .as_ref()
+        .is_some_and(|l| !l.kind.mod_loaders().is_empty())
+    {
+        progress(download::Progress::Stage {
+            name: "Checking mods".into(),
+            total: 1,
+        });
+        match crate::moddeps::install_missing(&http, paths, instance, progress).await {
+            Ok((_, still)) => {
+                for m in still {
+                    eprintln!(
+                        "warning: {} needs {}, which isn't on Modrinth for this version",
+                        m.needed_by.join(", "),
+                        m.id
+                    );
+                }
+            }
+            Err(e) => eprintln!("warning: couldn't check mod dependencies: {e}"),
+        }
+        progress(download::Progress::Advance);
+    }
+
     let natives_dir = instance.dir(paths).join("natives");
     let installed = install::install(
         &http,

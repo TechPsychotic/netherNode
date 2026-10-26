@@ -91,6 +91,18 @@ const HINTS: &[(&str, &str)] = &[
          build for your CPU or OS. Try launching again, or pick a newer version.",
     ),
     (
+        "Missing or unsupported mandatory dependencies",
+        "A mod needs another mod that isn't installed, and netherNode couldn't find it on \
+         Modrinth for this version. The report names it (\"Mod ID: …\"); get it from the mod's \
+         own page and drop the jar on the Mods screen.",
+    ),
+    (
+        "which is missing!",
+        "A mod needs another mod that isn't installed, and netherNode couldn't find it on \
+         Modrinth for this version. The report names it; get it from the mod's own page and \
+         drop the jar on the Mods screen.",
+    ),
+    (
         "Incompatible mods found",
         "Some mods are incompatible with each other or with this Minecraft version. The report \
          lists which ones.",
