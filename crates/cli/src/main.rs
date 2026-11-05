@@ -960,7 +960,7 @@ async fn main() -> Result<()> {
                         share::JoinEvent::WaitingForApproval => println!("waiting for your friend to allow you in…"),
                         share::JoinEvent::Ready { port, title, blocked } => {
                             println!(
-                                "connected to {title}! In Minecraft: Multiplayer, the world shows under LAN, or Direct Connect to localhost:{port}"
+                                "connected to {title}! In Minecraft: Multiplayer, the world shows under LAN, or Direct Connect to 127.0.0.1:{port}"
                             );
                             for p in blocked {
                                 println!("couldn't open {p} here (another program uses it)");

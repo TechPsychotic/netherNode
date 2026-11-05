@@ -1608,7 +1608,7 @@ impl App {
                     blocked,
                 } => (
                     format!(
-                        "Connected to {}! In Minecraft: Multiplayer → it's under LAN, or Direct Connect to localhost:{port}{}",
+                        "Connected to {}! In Minecraft: Multiplayer → it's under LAN, or Direct Connect to 127.0.0.1:{port}. Keep netherNode open while you play{}",
                         clip(title, 30),
                         if blocked.is_empty() {
                             String::new()
@@ -1633,7 +1633,7 @@ impl App {
             if let Some(port) = port {
                 row = row.push(
                     small_button("Copy address")
-                        .on_press(Message::CopyText(format!("localhost:{port}"))),
+                        .on_press(Message::CopyText(format!("127.0.0.1:{port}"))),
                 );
             }
             row = row.push(

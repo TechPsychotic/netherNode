@@ -764,7 +764,12 @@ pub async fn join(
     };
     // Listen on all interfaces so the LAN-list entry (which uses this computer's LAN address)
     // works, but only accept connections coming from this same computer.
-    let listener = listen_tcp(0)?;
+    // The host's own port number when it's free here, so the address stays the same every
+    // time (and matches what the host sees); any free port otherwise.
+    let listener = match welcome.game_port {
+        0 => listen_tcp(0)?,
+        same => listen_tcp(same).or_else(|_| listen_tcp(0))?,
+    };
     let port = listener.local_addr()?.port();
 
     // UDP on the game port's number (as the host has it) plus extra ports.

@@ -1,4 +1,4 @@
-**netherNode 1.2.2**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
+**netherNode 1.2.3**: offline Minecraft launcher for Windows, macOS and Linux. Builds aren't code-signed yet; see "Installing" below.
 
 ## Downloads
 
@@ -13,6 +13,12 @@
 - **Windows:** unzip, run `nethernode-gui.exe`. If SmartScreen appears: *More info → Run anyway*.
 - **macOS:** open the `.dmg`, drag netherNode to Applications, then right-click it → *Open* → *Open* (first time only). If macOS says it's damaged: `xattr -dr com.apple.quarantine /Applications/netherNode.app`.
 - **Linux:** extract, then run `./install.sh` (adds it to the app menu) or `./nethernode-gui` directly.
+
+## Fixed in 1.2.3
+
+- **Joining a friend's server:** *Play it*, Direct Connect and the copied address use `127.0.0.1` instead of `localhost`, so the game can't pick an address the tunnel isn't on ("Connection refused: getsockopt").
+- **Same address every time:** when the host's port is free on your PC, the tunnel uses that same port number, so a saved Multiplayer entry keeps working next time.
+- Joining reminds you to keep netherNode open while you play (the tunnel runs inside it).
 
 ## Fixed in 1.2.2
 

@@ -2081,7 +2081,7 @@ impl App {
                     return Task::none();
                 };
                 let target =
-                    nethernode_core::launch::QuickPlay::Multiplayer(format!("localhost:{port}"));
+                    nethernode_core::launch::QuickPlay::Multiplayer(format!("127.0.0.1:{port}"));
                 return self.play(instance, Some(target));
             }
             Message::LeaveFriend => {
