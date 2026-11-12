@@ -1,0 +1,36 @@
+name: Bug report
+description: Something doesn't work or crashes
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: netherNode version
+      placeholder: "1.2.3"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS (Apple Silicon), macOS (Intel), Linux, Other]
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Minecraft version and loader
+      placeholder: "1.21.1, Fabric (or vanilla)"
+  - type: textarea
+    id: log
+    attributes:
+      label: Log or crash report
+      description: Open the instance's Folder and attach logs/latest.log, or anything in crash-reports/. Drag files in here.
+      render: text

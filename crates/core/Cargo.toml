@@ -3,6 +3,12 @@ name = "nethernode-core"
 version = "1.2.3"
 edition = "2024"
 license = "GPL-3.0-or-later"
+description = "The launcher library behind netherNode: versions, Java, mod loaders, Modrinth, servers and playing with friends."
+repository = "https://github.com/TechPsychotic/netherNode"
+homepage = "https://techpsychotic.github.io/netherNode/"
+readme = "../../README.md"
+keywords = ["minecraft", "launcher", "modrinth", "fabric", "forge"]
+categories = ["games"]
 
 [dependencies]
 bytes = "1"

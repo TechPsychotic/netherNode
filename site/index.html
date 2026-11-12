@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>netherNode</title>
+  <meta name="description" content="netherNode is a free, open-source offline Minecraft launcher for Windows, macOS and Linux: every version, Fabric, Quilt, Forge and NeoForge, Modrinth mods and modpacks, your own servers, and playing with friends over the internet without port forwarding.">
+  <meta name="theme-color" content="#0c0814">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="netherNode: an offline Minecraft launcher">
+  <meta property="og:description" content="Every version, every major mod loader, Modrinth mods and modpacks, your own servers, and friends over the internet without port forwarding.">
+  <meta property="og:url" content="https://techpsychotic.github.io/netherNode/">
+  <meta property="og:image" content="https://techpsychotic.github.io/netherNode/screenshots/home.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/32.png">
+  <link rel="apple-touch-icon" href="icons/256.png">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js" } }</script>
+  <script src="textures.js" defer></script>
+  <script type="module" src="main.js"></script>
+</head>
+<body>
+<a class="skip" href="#download">Skip to download</a>
+
+<header class="bar">
+  <a class="brand" href="#top"><img src="icons/64.png" alt="" width="28" height="28"><span>netherNode</span></a>
+  <nav aria-label="Sections">
+    <a href="#surface">Play</a>
+    <a href="#mineshaft">Mods</a>
+    <a href="#nether">Friends</a>
+    <a href="#fortress">Servers</a>
+    <a href="#end">Your stuff</a>
+  </nav>
+  <a class="btn btn-small" href="#download">Download</a>
+  <a class="gh" href="https://github.com/TechPsychotic/netherNode" aria-label="netherNode on GitHub">
+    <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
+</header>
+
+<aside class="depth" aria-hidden="true">
+  <div class="depth-y"><span>Y</span><b id="depthY">180</b></div>
+  <ol id="depthList"></ol>
+</aside>
+
+<!-- The 3D world sits behind the page; the feature cards scroll over it. -->
+<canvas id="world" aria-hidden="true"></canvas>
+<div id="wash" aria-hidden="true"></div>
+<p id="loading" aria-hidden="true">Generating world…</p>
+<div class="dropzone" aria-hidden="true"><p>Drop your skin to wear it</p></div>
+
+<main id="top">
+
+<!-- ============ 1. SURFACE ============ -->
+<section class="scene" id="surface" data-scene="surface" data-y="180" data-label="Play">
+  <div class="beats">
+    <div class="beat intro">
+      <div class="intro-card">
+        <p class="kicker">Offline Minecraft launcher · Windows · macOS · Linux</p>
+        <h1 class="logo">netherNode</h1>
+        <p class="lede">Every version. Every major mod loader. Modrinth mods and modpacks, your own servers, and playing with friends over the internet, without port forwarding.</p>
+        <div class="cta">
+          <a class="btn" id="heroDownload" href="https://github.com/TechPsychotic/netherNode/releases/latest">Download</a>
+          <a class="btn btn-ghost" href="https://github.com/TechPsychotic/netherNode">View source</a>
+        </div>
+        <p class="fine" id="heroVersion">Free and open source (GPL-3.0). No accounts, no ads, no telemetry.</p>
+        <p class="fine skin-try"><label class="linkish">Try your own skin<input type="file" id="skinInput" accept="image/png" hidden></label> <span id="skinMsg">or drop a 64×64 skin PNG anywhere.</span></p>
+      </div>
+      <p class="scroll-hint">Scroll to start the journey <span>▼</span></p>
+    </div>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y 180 · The summit</p>
+      <h2>Pick a name. Play.</h2>
+      <p><strong>Offline accounts</strong> with any username of 3 to 16 letters, digits or <code>_</code>. No Microsoft or Mojang login, ever.</p>
+      <button class="shot" data-src="screenshots/accounts.png" aria-label="Enlarge screenshot: accounts and skins"><img src="screenshots/accounts.png" alt="Accounts screen with offline names and a skin preview" loading="lazy"></button>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y 180 · The summit</p>
+      <h2>Every version ever released</h2>
+      <p>From old alphas to today's snapshot, straight from Mojang's list. The right Java for each one is downloaded for you, so the first <b>PLAY</b> just works.</p>
+      <button class="shot" data-src="screenshots/home.png" aria-label="Enlarge screenshot: home screen"><img src="screenshots/home.png" alt="Home screen with instance cards over an animated nether portal" loading="lazy"></button>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y 180 · The summit</p>
+      <h2>Fits your PC</h2>
+      <p>Game memory is sized to your RAM and to what's free right now. The game opens at 1280×720 or any size you choose, and low-RAM machines get lighter settings, down to a lighter launcher at 4&nbsp;GB.</p>
+      <button class="shot" data-src="screenshots/edit.png" aria-label="Enlarge screenshot: instance settings"><img src="screenshots/edit.png" alt="Instance settings: name, loader, window size, worlds, memory" loading="lazy"></button>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y 180 · The summit</p>
+      <h2>Your skin, your cape</h2>
+      <p>Custom skins and capes for offline accounts, with classic or slim arms. Friends who play with you through netherNode see them too, in worlds and on your servers.</p>
+      <p class="aside">Time to dig down.</p>
+    </div></article>
+  </div>
+</section>
+
+
+<!-- ============ 2. MINESHAFT ============ -->
+<section class="scene dark" id="mineshaft" data-scene="mineshaft" data-y="12" data-label="Mods">
+  <div class="beats">
+    <article class="beat"><div class="card">
+      <p class="kicker">Y 12 · Abandoned mineshaft</p>
+      <h2>Mod loaders in one click</h2>
+      <p>Fabric, Quilt, Forge (including pre-1.13) and NeoForge. Loaders that haven't released for a version yet are greyed out, so you never pick a broken combination.</p>
+      <ul class="chips"><li>Fabric</li><li>Quilt</li><li>Forge</li><li>NeoForge</li></ul>
+      <button class="shot" data-src="screenshots/new.png" aria-label="Enlarge screenshot: new instance"><img src="screenshots/new.png" alt="New instance dialog with a version list and loader picker" loading="lazy"></button>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y 12 · Abandoned mineshaft</p>
+      <h2>OptiFine, solved</h2>
+      <p>A one-click open-source alternative: Sodium, Iris (your OptiFine shader packs work), connected textures, dynamic lights, zoom and more. Or install a real OptiFine jar and netherNode sets it up.</p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y 12 · Abandoned mineshaft</p>
+      <h2>Mods from Modrinth</h2>
+      <p>Search Modrinth, filtered to what works with the instance. Turn mods on and off, or drop <code>.jar</code> files straight onto the window.</p>
+      <button class="shot" data-src="screenshots/browse.png" aria-label="Enlarge screenshot: browse mods"><img src="screenshots/browse.png" alt="Browsing Modrinth mods inside netherNode" loading="lazy"></button>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y 12 · Abandoned mineshaft</p>
+      <h2>Whole modpacks, one click</h2>
+      <p>Install modpacks from Modrinth, or import <code>.mrpack</code> files. They build out of sight and clean up after themselves if interrupted.</p>
+      <button class="shot" data-src="screenshots/modpacks.png" aria-label="Enlarge screenshot: modpacks"><img src="screenshots/modpacks.png" alt="Modpacks screen listing Modrinth packs" loading="lazy"></button>
+    </div></article>
+  </div>
+</section>
+
+
+<!-- ============ 3. CAVES ============ -->
+<section class="scene dark" id="caves" data-scene="caves" data-y="-52" data-label="Fixes">
+  <div class="beats">
+    <article class="beat"><div class="card">
+      <p class="kicker">Y −52 · Deep caves · Monster 1 of 4</p>
+      <h2>"Requires mod X, which is missing"</h2>
+      <p>Not any more. Before a modded game starts, netherNode reads what every mod needs and installs anything missing from Modrinth, even for jars you added yourself.</p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y −52 · Deep caves · Monster 2 of 4</p>
+      <h2>The wrong Java</h2>
+      <p>Each Minecraft version gets the Java it was made for, downloaded and checked before launch. On Apple Silicon, old versions run under Rosetta 2 automatically.</p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y −52 · Deep caves · Monster 3 of 4</p>
+      <h2>"The filename or extension is too long"</h2>
+      <p>Big modpacks on Windows start normally: long launch commands go through a file instead of hitting Windows' length limit.</p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Y −52 · Deep caves · Monster 4 of 4</p>
+      <h2>Crashes, explained</h2>
+      <p>netherNode reads crash reports and Java errors and tells you the likely fix, right on the instance, next to a live game log.</p>
+      <button class="shot" data-src="screenshots/playing.png" aria-label="Enlarge screenshot: game running"><img src="screenshots/playing.png" alt="A running game with the live log and stop button" loading="lazy"></button>
+    </div></article>
+  </div>
+</section>
+
+<!-- ============ 4. PORTAL ============ -->
+<section class="scene dark" id="portal" data-scene="portal" data-extra="1.6" data-y="-58" data-label="Multiplayer">
+  <div class="beats">
+    <article class="beat"><div class="card">
+      <p class="kicker">Y −58 · Deeper still</p>
+      <h2>Everything so far, you can do alone</h2>
+      <p>On the other side of this portal: your friends.</p>
+    </div></article>
+  </div>
+</section>
+
+<!-- ============ 5. NETHER ============ -->
+<section class="scene" id="nether" data-scene="nether" data-y="64" data-label="Friends">
+  <div class="beats">
+    <article class="beat"><div class="card">
+      <p class="kicker">The Nether · Together</p>
+      <h2>Invite friends with four words</h2>
+      <p>Open your world to LAN, click <b>Invite friends</b> and read out the code. Your friend types it in <b>Join friend</b> and finds your world in Minecraft's LAN list.</p>
+      <p class="code-words" aria-label="Example code: maple orbit tunnel frog"><span>maple</span><span>orbit</span><span>tunnel</span><span>frog</span></p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">The Nether · Together</p>
+      <h2>No port forwarding. Even behind CGNAT.</h2>
+      <p>Both computers connect outwards and punch a direct path through NAT when they can; otherwise traffic goes through a relay that only sees encrypted data. End-to-end encrypted, and you approve every new player.</p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">The Nether · Together</p>
+      <h2>A friends list</h2>
+      <p>Add friends once with a four-word friend code. See who's online and what they're sharing, and join with one click: no codes, no Allow prompts.</p>
+      <button class="shot" data-src="screenshots/friends.png" aria-label="Enlarge screenshot: friends"><img src="screenshots/friends.png" alt="Friends screen showing who's online and what they share" loading="lazy"></button>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">The Nether · Together</p>
+      <h2>Modded multiplayer that just works</h2>
+      <p>Join a friend who plays with mods and netherNode offers <b>Get the same mods</b>: the same loader and mods, from Modrinth or straight from your friend, every file checked. Then <b>Play it</b>.</p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">The Nether · Together</p>
+      <h2>Voice chat comes along</h2>
+      <p>Simple Voice Chat is found automatically, and other mods that need a port work through the same tunnel. Desktop notifications tell you when someone wants in, even in fullscreen.</p>
+    </div></article>
+  </div>
+</section>
+
+
+<!-- ============ 6. FORTRESS ============ -->
+<section class="scene" id="fortress" data-scene="fortress" data-y="40" data-label="Servers">
+  <div class="beats">
+    <article class="beat"><div class="card">
+      <p class="kicker">Nether fortress · Servers</p>
+      <h2>Host a server on your PC</h2>
+      <p>Vanilla, Fabric, Forge or NeoForge for mods, or Paper for plugins. Accept the EULA, press <b>Start</b>, and <b>Invite friends</b>.</p>
+      <ul class="chips"><li>Vanilla</li><li>Fabric</li><li>Forge</li><li>NeoForge</li><li>Paper</li></ul>
+      <button class="shot" data-src="screenshots/servers.png" aria-label="Enlarge screenshot: servers"><img src="screenshots/servers.png" alt="Servers screen with a running server and its console" loading="lazy"></button>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Nether fortress · Servers</p>
+      <h2>Bring your instance's mods</h2>
+      <p>Make a server from an instance and its version, loader and mods come along. Game-only mods like Sodium are left out for you.</p>
+      <button class="shot" data-src="screenshots/new-server.png" aria-label="Enlarge screenshot: new server from an instance"><img src="screenshots/new-server.png" alt="New server dialog based on an existing instance" loading="lazy"></button>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Nether fortress · Servers</p>
+      <h2>Run several at once</h2>
+      <p>Each server gets its own invite code. A live console, every <code>server.properties</code> setting explained in plain words, a whitelist, and skins for everyone.</p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">Nether fortress · Servers</p>
+      <h2>Right there in Multiplayer</h2>
+      <p>Your servers show up in Minecraft's Multiplayer list as "<i>name</i> (this PC)". If a mod only works in the game, netherNode moves it out of the server and tells you.</p>
+      <p class="aside">The gateway hums. One more step.</p>
+    </div></article>
+  </div>
+</section>
+
+<!-- ============ 7. THE END ============ -->
+<section class="scene" id="end" data-scene="end" data-y="0" data-label="Your stuff">
+  <div class="beats">
+    <article class="beat"><div class="card">
+      <p class="kicker">The End · Your stuff</p>
+      <h2>Bring your worlds</h2>
+      <p>Import world folders or <code>.zip</code> backups into any instance or server.</p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">The End · Your stuff</p>
+      <h2>Your folders, your drives</h2>
+      <p>Keep game files, instances and servers on any drive. Rename instances any time. Set <code>NETHERNODE_HOME</code> for a fully portable install.</p>
+      <button class="shot" data-src="screenshots/settings.png" aria-label="Enlarge screenshot: settings"><img src="screenshots/settings.png" alt="Settings: folders, graphics and skins" loading="lazy"></button>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">The End · Your stuff</p>
+      <h2>A command line for everything</h2>
+      <p>The <code>nethernode</code> binary does everything the app does.</p>
+<pre class="term"><code><span>$</span> nethernode instance create modded 1.21.1 --loader fabric
+<span>$</span> nethernode mods add modded sodium
+<span>$</span> nethernode server start smp --share
+<span>$</span> nethernode share join maple orbit tunnel frog</code></pre>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">The End · Your stuff</p>
+      <h2>Nothing phoned home</h2>
+      <p>No accounts, analytics or telemetry. netherNode only talks to Mojang (game files and Java), Modrinth, the loader and Paper sites when you install those, and iroh's relay for playing with friends.</p>
+    </div></article>
+    <article class="beat"><div class="card">
+      <p class="kicker">The End · Your stuff</p>
+      <h2>Free software, all the way down</h2>
+      <p>Written in Rust, licensed GPL-3.0-or-later. netherNode never ships Mojang's art: block icons come from your own game files.</p>
+    </div></article>
+  </div>
+</section>
+
+<!-- ============ DOWNLOAD ============ -->
+<section class="finale" id="download">
+  <div class="finale-inner">
+    <img class="finale-icon" src="icons/128.png" alt="" width="96" height="96">
+    <h2 class="logo small">Your journey starts here</h2>
+    <p class="lede" id="finaleVersion">Download the latest release for your computer.</p>
+    <div class="platforms">
+      <a class="platform" data-os="windows" href="https://github.com/TechPsychotic/netherNode/releases/latest">
+        <b>Windows</b><span>10 and 11, x64 (runs on ARM)</span><em>.zip</em>
+      </a>
+      <a class="platform" data-os="mac" href="https://github.com/TechPsychotic/netherNode/releases/latest">
+        <b>macOS</b><span>11+, Intel and Apple Silicon</span><em>.dmg</em>
+      </a>
+      <a class="platform" data-os="linux" href="https://github.com/TechPsychotic/netherNode/releases/latest">
+        <b>Linux</b><span>x64, any distro</span><em>.tar.gz</em>
+      </a>
+    </div>
+    <details class="unsigned">
+      <summary>The builds aren't code-signed yet. Here's how to open them.</summary>
+      <ul>
+        <li><b>Windows:</b> if SmartScreen appears, click <i>More info</i>, then <i>Run anyway</i>.</li>
+        <li><b>macOS:</b> right-click the app, choose <i>Open</i>, then <i>Open</i> again. If macOS says it's damaged, run <code>xattr -dr com.apple.quarantine /Applications/netherNode.app</code>.</li>
+        <li><b>Linux:</b> extract, then run <code>./install.sh</code> to add netherNode to your app menu. Minecraft 1.12.2 and older also need <code>xrandr</code>.</li>
+      </ul>
+    </details>
+    <div class="source">
+      <p>Or build it yourself with <a href="https://rustup.rs">Rust</a>:</p>
+<pre class="term"><code><span>$</span> git clone https://github.com/TechPsychotic/netherNode
+<span>$</span> cd netherNode &amp;&amp; cargo build --release</code></pre>
+    </div>
+    <p class="links">
+      <a href="https://github.com/TechPsychotic/netherNode#readme">Docs &amp; FAQ</a>
+      <a href="https://github.com/TechPsychotic/netherNode/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/TechPsychotic/netherNode/blob/main/ROADMAP.md">Roadmap</a>
+      <a href="https://github.com/TechPsychotic/netherNode/issues">Report a bug</a>
+    </p>
+  </div>
+  <footer>
+    <p>netherNode is free software under the GNU GPL v3.0 or later.</p>
+    <p>Minecraft is a trademark of Mojang AB. netherNode is not affiliated with or endorsed by Mojang or Microsoft. The worlds, characters and textures on this page are original.</p>
+  </footer>
+</section>
+
+</main>
+
+<dialog id="lightbox" aria-label="Screenshot">
+  <form method="dialog"><button class="close" aria-label="Close">×</button></form>
+  <img alt="">
+</dialog>
+</body>
+</html>

@@ -1,0 +1,15 @@
+name: Feature request
+description: Suggest something netherNode should do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [roadmap](https://github.com/TechPsychotic/netherNode/blob/main/ROADMAP.md) first. netherNode is offline-accounts only and uses Modrinth only, so Microsoft login and CurseForge are out of scope.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: The problem it solves and how you'd expect it to work.
+    validations:
+      required: true

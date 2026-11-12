@@ -9,6 +9,20 @@
 </p>
 
 <p align="center">
+  <a href="https://techpsychotic.github.io/netherNode/"><b>Website</b></a> ·
+  <a href="https://github.com/TechPsychotic/netherNode/releases/latest"><b>Download</b></a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="ROADMAP.md">Roadmap</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/TechPsychotic/netherNode/releases/latest"><img src="https://img.shields.io/github/v/release/TechPsychotic/netherNode?color=9b5cff" alt="Latest release"></a>
+  <a href="https://github.com/TechPsychotic/netherNode/actions/workflows/ci.yml"><img src="https://github.com/TechPsychotic/netherNode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
+  <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-555" alt="Windows, macOS, Linux">
+</p>
+
+<p align="center">
   <img src="docs/screenshots/home.png" alt="netherNode home screen: instance cards, details panel and play bar over an animated nether portal">
 </p>
 
@@ -164,7 +178,7 @@ The workspace has three crates:
 - `crates/cli`: the `nethernode` command
 - `crates/gui`: the `nethernode-gui` app, built with [iced](https://iced.rs)
 
-Pushing a `v*` tag builds Windows, macOS and Linux releases through GitHub Actions.
+Pushing a `v*` tag builds Windows, macOS and Linux releases through GitHub Actions. The website in `site/` is published to GitHub Pages on every push to `main`.
 
 ## FAQ
 
@@ -204,6 +218,10 @@ The interface uses the public-domain [Minecraft font](https://www.fontspace.com/
 
 netherNode is free software under the [GNU General Public License v3.0](LICENSE) (or any later version). You can use, study, share and change it; if you distribute a changed version, it has to be under the GPL too, with its source code. Bundled fonts keep their own licenses (see `assets/fonts/`). Minecraft is a trademark of Mojang AB; netherNode is not affiliated with Mojang or Microsoft.
 
-## Roadmap
+## Roadmap and changes
 
-See [ROADMAP.md](ROADMAP.md) for what's done and what's next.
+See [ROADMAP.md](ROADMAP.md) for what's done and what's next, and [CHANGELOG.md](CHANGELOG.md) for every release.
+
+## Contributing
+
+Bug reports, testing and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately as described in [SECURITY.md](SECURITY.md).
