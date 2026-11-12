@@ -117,6 +117,8 @@ const ZONES = {
       const x = cx * 5 + ((h3(cx, 8, cz, seed) * 4) | 0), z = cz * 5 + ((h3(cx, 9, cz, seed) * 4) | 0), h = hAt(x, z);
       if (w.get(x, h, z) === B.grass && h < 62 && Math.abs(z - PZ) > 5) tree(w, x, h + 1, z, seed);
     }
+    // The hole the explorer digs (main.js covers it with a breakable block).
+    for (let y = ridge(58) - 7; y <= ridge(58); y++) w.set(58, y, PZ, 0);
     const ground = Array.from({ length: w.sx }, (_, x) => ridge(x) + 1);
     return { w, PZ, ground, sky: true, ambient: [0.3, 0.32, 0.4], skyCol: [0.78, 0.76, 0.72], blockCol: [1, 0.85, 0.6], actor: [1, 1, 1] };
   },
@@ -151,6 +153,7 @@ const ZONES = {
         }
       }
     }
+    for (let y = 1; y <= floor; y++) w.set(76, y, PZ, 0); // a hole down to the caves
     return { w, PZ, ground: Array(w.sx).fill(floor + 1), sky: false, ambient: [0.13, 0.13, 0.17], blockCol: [1.2, 0.98, 0.74], actor: [0.95, 0.86, 0.76] };
   },
 
@@ -193,7 +196,7 @@ const ZONES = {
     return { w, PZ, ground: Array(w.sx).fill(floor + 1), sky: false, ambient: [0.24, 0.25, 0.33], blockCol: [1.2, 0.95, 0.74], actor: [0.9, 0.86, 0.9] };
   },
 
-  nether(seed, fortress) {
+  nether(seed) {
     const w = World(200, 92, 150), PZ = 24, sea = 32, shore = 36, deck = 44;
     for (let z = 0; z < w.sz; z++) for (let x = 0; x < w.sx; x++) {
       const floorH = 18 + 22 * fbm2(x / 34, z / 34, seed) - 4;
@@ -226,32 +229,32 @@ const ZONES = {
       let y = w.sy - 2; while (y > sea && !(w.get(x, y, z) && !w.get(x, y - 1, z))) y--;
       for (y = y - 1; y > sea && !w.get(x, y, z); y--) w.set(x, y, z, B.lava);
     }
-    let standY = shore + 1;
-    if (fortress) {
-      standY = deck + 1;
-      w.box(0, deck - 1, PZ - 13, w.sx - 1, deck + 12, PZ + 4, 0);
-      w.box(0, deck - 1, PZ - 3, w.sx - 1, deck, PZ + 3, B.nbrick);
-      for (let x = 0; x < w.sx; x++) { w.set(x, deck + 1, PZ - 3, B.nfence); w.set(x, deck + 1, PZ + 3, B.nfence); }
-      for (let x = 2; x < w.sx; x += 13) for (let y = deck - 2; y > sea - 6; y--) w.box(x, y, PZ - 2, x + 2, y, PZ + 2, B.nbrick);
-      const xb = 104;
-      w.box(xb - 4, deck - 1, PZ + 4, xb + 4, deck + 10, w.sz - 10, 0);
-      w.box(xb - 3, deck - 1, PZ + 3, xb + 3, deck, w.sz - 12, B.nbrick);
-      for (let z = PZ + 4; z < w.sz - 12; z++) { w.set(xb - 3, deck + 1, z, B.nfence); w.set(xb + 3, deck + 1, z, B.nfence); }
-      for (let x = xb - 2; x <= xb + 2; x++) w.set(x, deck + 1, PZ + 3, 0);
-      for (let z = PZ + 14; z < w.sz - 12; z += 13) for (let y = deck - 2; y > sea - 6; y--) w.box(xb - 2, y, z, xb + 2, y, z + 2, B.nbrick);
-      for (const [tx, tz] of [[48, PZ + 7], [150, PZ + 7], [xb - 4, 104]]) {
-        w.box(tx - 1, deck - 1, tz - 1, tx + 9, deck + 24, tz + 9, 0);
-        for (let y = sea - 4; y < deck + 20; y++) for (let i = 0; i < 9; i++) for (const [x, z] of [[tx + i, tz], [tx + i, tz + 8], [tx, tz + i], [tx + 8, tz + i]]) {
-          w.set(x, y, z, y > deck && y % 5 === 2 && i % 3 === 1 ? 0 : B.nbrick);
-        }
-        w.box(tx, deck + 20, tz, tx + 8, deck + 20, tz + 8, B.nbrick);
-        for (let i = 0; i < 9; i += 2) { w.set(tx + i, deck + 21, tz, B.nfence); w.set(tx + i, deck + 21, tz + 8, B.nfence); w.set(tx, deck + 21, tz + i, B.nfence); w.set(tx + 8, deck + 21, tz + i, B.nfence); }
-      }
-    } else {
-      w.box(0, shore + 1, PZ - 13, w.sx - 1, shore + 14, PZ + 3, 0);
-      for (let x = 0; x < w.sx; x++) for (let z = PZ - 13; z <= PZ + 3; z++) for (let y = sea - 2; y <= shore; y++) w.set(x, y, z, h3(x, y, z, seed) < 0.03 ? B.quartz : B.netherrack);
+    // One continuous world: a netherrack cliff (x < BRIDGE) that leads straight onto a fortress bridge.
+    const BRIDGE = 58, xb = 84;
+    w.box(0, deck + 1, PZ - 13, w.sx - 1, deck + 12, PZ + 4, 0);
+    for (let x = 0; x < BRIDGE; x++) for (let z = PZ - 13; z <= PZ + 3; z++) for (let y = sea - 2; y <= deck; y++) {
+      const edge = x > BRIDGE - 4 && (z < PZ - 3 || z > PZ + 3);
+      if (!edge || y < deck - (x - (BRIDGE - 4)) * 3) w.set(x, y, z, h3(x, y, z, seed) < 0.03 ? B.quartz : B.netherrack);
     }
-    return { w, PZ, ground: Array(w.sx).fill(standY), sky: false, ambient: [0.36, 0.2, 0.15], blockCol: [1.2, 0.8, 0.5], actor: [1, 0.8, 0.7] };
+    for (let x = BRIDGE - 2; x < w.sx; x++) {
+      w.box(x, deck - 1, PZ - 3, x, deck, PZ + 3, B.nbrick);
+      if (x >= BRIDGE) { w.set(x, deck + 1, PZ - 3, B.nfence); w.set(x, deck + 1, PZ + 3, B.nfence); }
+    }
+    for (let x = BRIDGE + 4; x < w.sx; x += 13) for (let y = deck - 2; y > sea - 6; y--) w.box(x, y, PZ - 2, x + 2, y, PZ + 2, B.nbrick);
+    w.box(xb - 4, deck - 1, PZ + 4, xb + 4, deck + 10, w.sz - 10, 0);
+    w.box(xb - 3, deck - 1, PZ + 3, xb + 3, deck, w.sz - 12, B.nbrick);
+    for (let z = PZ + 4; z < w.sz - 12; z++) { w.set(xb - 3, deck + 1, z, B.nfence); w.set(xb + 3, deck + 1, z, B.nfence); }
+    for (let x = xb - 2; x <= xb + 2; x++) w.set(x, deck + 1, PZ + 3, 0);
+    for (let z = PZ + 14; z < w.sz - 12; z += 13) for (let y = deck - 2; y > sea - 6; y--) w.box(xb - 2, y, z, xb + 2, y, z + 2, B.nbrick);
+    for (const [tx, tz] of [[66, PZ + 7], [104, PZ + 7], [xb - 4, 96]]) {
+      w.box(tx - 1, deck - 1, tz - 1, tx + 9, deck + 24, tz + 9, 0);
+      for (let y = sea - 4; y < deck + 20; y++) for (let i = 0; i < 9; i++) for (const [x, z] of [[tx + i, tz], [tx + i, tz + 8], [tx, tz + i], [tx + 8, tz + i]]) {
+        w.set(x, y, z, y > deck && y % 5 === 2 && i % 3 === 1 ? 0 : B.nbrick);
+      }
+      w.box(tx, deck + 20, tz, tx + 8, deck + 20, tz + 8, B.nbrick);
+      for (let i = 0; i < 9; i += 2) { w.set(tx + i, deck + 21, tz, B.nfence); w.set(tx + i, deck + 21, tz + 8, B.nfence); w.set(tx, deck + 21, tz + i, B.nfence); w.set(tx + 8, deck + 21, tz + i, B.nfence); }
+    }
+    return { w, PZ, ground: Array(w.sx).fill(deck + 1), sky: false, ambient: [0.36, 0.2, 0.15], blockCol: [1.2, 0.8, 0.5], actor: [1, 0.8, 0.7] };
   },
 
   end(seed) {
@@ -268,12 +271,11 @@ const ZONES = {
     island(105, top, 72, 104, 62, 34, true);
     for (let z = 10; z < 135; z++) for (let x = 0; x < w.sx; x++) if (Math.abs(z - PZ) > 6 && w.get(x, top, z) === B.endstone && n2(x / 5, z / 5, seed + 3) > 0.8) w.set(x, top + 1, z, B.endstone);
     for (let k = 0; k < 10; k++) {
-      const a = (k / 10) * Math.PI * 2, px = Math.round(105 + Math.cos(a) * 46), pz = Math.round(92 + Math.sin(a) * 26);
+      const a = (k / 10) * Math.PI * 2, px = Math.round(132 + Math.cos(a) * 40), pz = Math.round(112 + Math.sin(a) * 22);
       const r = 2 + (k % 3), ht = 64 + ((h3(k, 1, 1, seed) * 34) | 0);
       for (let y = top - 2; y <= ht; y++) for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) if (dx * dx + dz * dz <= r * r + 1) w.set(px + dx, y, pz + dz, B.obsidian);
     }
-    island(150, 58, 172, 46, 30, 26);
-    island(48, 52, 180, 30, 22, 18);
+    island(30, 52, 186, 26, 20, 18);
     for (let k = 0; k < 8; k++) island(20 + ((h3(k, 4, 4, seed) * 170) | 0), 34 + ((h3(k, 5, 5, seed) * 46) | 0), 140 + ((h3(k, 6, 6, seed) * 60) | 0), 5 + (k % 4) * 3, 4 + (k % 3) * 3, 8);
     const tower = (tx, by, tz, levels) => {
       let s = 11, y = by;
@@ -290,11 +292,13 @@ const ZONES = {
       w.box(tx, y, tz, tx, y + 3, tz, B.pillar);
       w.set(tx, y + 4, tz, B.window);
     };
-    tower(140, 59, 168, 6); tower(166, 59, 180, 4); tower(126, 59, 184, 4); tower(50, 53, 182, 3);
+    // The End city stands on the main island, where the walk ends.
+    tower(76, top + 1, PZ + 16, 6); tower(97, top + 1, PZ + 24, 5); tower(70, top + 1, PZ + 34, 4); tower(32, 53, 188, 3);
+    // The obsidian platform you arrive on.
+    w.box(25, top, PZ - 2, 31, top, PZ + 2, B.obsidian);
     return { w, PZ, ground: Array(w.sx).fill(top + 1), sky: true, ambient: [0.36, 0.32, 0.46], skyCol: [0.5, 0.44, 0.58], blockCol: [1.1, 0.8, 1.1], actor: [0.9, 0.84, 1] };
   },
 };
-ZONES.fortress = (seed) => ZONES.nether(seed + 3, true);
 
 // ---------- light ----------
 function flood(w, L, seedFn) {

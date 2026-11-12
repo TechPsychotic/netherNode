@@ -55,7 +55,6 @@ const ZONE_LOOK = {
   mineshaft: { fog: 0x0b0a10, near: 8, far: 56 },
   caves: { fog: 0x10111c, near: 18, far: 96 },
   nether: { fog: 0x6e1c12, near: 22, far: 118 },
-  fortress: { fog: 0x6e1c12, near: 22, far: 118 },
   end: { fog: 0x1d102e, near: 60, far: 240 },
 };
 const zones = {};
@@ -405,6 +404,7 @@ class Player {
     if (this.mob === "zombie" || this.mob === "skeleton") { P.armR.rotation.x = -Math.PI / 2 + Math.sin(t * 3) * 0.05; P.armL.rotation.x = -Math.PI / 2 - Math.sin(t * 3) * 0.05; return; }
     if (pose === "mine") P.armR.rotation.x = -1.3 + Math.sin(t * 15) * 0.85;
     else if (pose === "fight") P.armR.rotation.x = -1.6 + Math.sin(t * 22) * 1.1;
+    else if (pose === "dig") { P.armR.rotation.x = -0.7 + Math.sin(t * 15) * 0.55; P.head.rotation.x = 0.55; return; }
     else if (pose === "fall") { P.armR.rotation.x = P.armL.rotation.x = -2.9; P.legR.rotation.x = 0.3; P.legL.rotation.x = -0.3; }
     else P.armR.rotation.x = -swing * amp * 0.8 + (pose === "idle" ? Math.sin(t * 1.6) * 0.04 : 0);
     if (pose === "idle") P.head.rotation.y = Math.sin(t * 0.5) * 0.35;
@@ -535,10 +535,10 @@ const ores = ORE_KINDS.map((k) => {
 const rails = new THREE.Group();
 zones.mineshaft.scene.add(rails);
 
-// Portal frame and its swirl.
-const portalBlocks = [];
-const portal = new THREE.Group();
-{
+// Portals: an obsidian frame with a swirling surface. One is built in the caves; its twin
+// in the Nether is where the player steps out.
+function makePortal(scene, startLit) {
+  const group = new THREE.Group(), blocks = [];
   const mat = new THREE.MeshBasicMaterial({ map: blockTex("obsidian") });
   const cells = [];
   for (let z = 0; z < 4; z++) cells.push([0, z]);
@@ -547,13 +547,13 @@ const portal = new THREE.Group();
   for (const [y, z] of cells) {
     const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
     m.position.set(0.5, y + 0.5, z + 0.5);
-    m.visible = false;
-    portal.add(m);
-    portalBlocks.push(m);
+    m.visible = startLit;
+    group.add(m);
+    blocks.push(m);
   }
   const swirl = new THREE.Mesh(new THREE.PlaneGeometry(2, 3), new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
-    uniforms: { uTime: { value: 0 }, uLit: { value: 0 } },
+    uniforms: { uTime: { value: 0 }, uLit: { value: startLit ? 1 : 0 } },
     vertexShader: "varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }",
     fragmentShader: `uniform float uTime; uniform float uLit; varying vec2 vUv;
       float h(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5); }
@@ -568,17 +568,78 @@ const portal = new THREE.Group();
   }));
   swirl.rotation.y = Math.PI / 2;
   swirl.position.set(0.5, 2.5, 2);
-  portal.add(swirl);
-  portal.userData.swirl = swirl;
-  zones.caves.scene.add(portal);
+  group.add(swirl);
+  scene.add(group);
+  return { group, blocks, lit(v, t) { swirl.material.uniforms.uLit.value = v; swirl.material.uniforms.uTime.value = t; } };
 }
-// End gateway beam at the end of the fortress bridge.
-const gateway = new THREE.Mesh(new THREE.BoxGeometry(1.4, 14, 1.4), new THREE.ShaderMaterial({
-  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, uniforms: { uLit: { value: 0 }, uTime: { value: 0 } },
-  vertexShader: "varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }",
-  fragmentShader: "uniform float uLit; uniform float uTime; varying vec3 vP; void main(){ float f = 1.0 - abs(vP.y) / 7.0; float n = 0.75 + 0.25 * sin(vP.y * 3.0 - uTime * 4.0); gl_FragColor = vec4(vec3(0.85,0.7,1.0) * n, f * uLit * 0.8); }",
-}));
-zones.fortress.scene.add(gateway);
+const cavePortal = makePortal(zones.caves.scene, false);
+const netherPortal = makePortal(zones.nether.scene, true);
+
+// The End portal at the end of the fortress bridge: twelve frame blocks with eyes around a
+// 3×3 pool of starry void, sunk into the deck.
+const endPortal = (() => {
+  const group = new THREE.Group();
+  const side = blockTex("end_frame_side"), top = blockTex("end_frame_top");
+  const mats = [side, side, top, side, side, side].map((m) => new THREE.MeshBasicMaterial({ map: m }));
+  const geo = new THREE.BoxGeometry(1, 0.8125, 1);
+  for (let z = -2; z <= 2; z++) for (let x = -2; x <= 2; x++) {
+    const ring = Math.max(Math.abs(x), Math.abs(z)) === 2 && Math.abs(x) + Math.abs(z) < 4;
+    if (!ring) continue;
+    const m = new THREE.Mesh(geo, mats);
+    m.position.set(x + 0.5, 0.40625, z + 0.5);
+    // Square to the pool, three blocks per side, like a real frame.
+    m.rotation.y = Math.abs(x) === 2 ? (x > 0 ? Math.PI / 2 : -Math.PI / 2) : z > 0 ? 0 : Math.PI;
+    group.add(m);
+  }
+  const pool = new THREE.Mesh(new THREE.PlaneGeometry(3, 3), new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 } }, fog: false,
+    vertexShader: "varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }",
+    fragmentShader: `uniform float uTime; varying vec2 vUv;
+      float star(vec2 p){ vec2 i = floor(p), f = fract(p); float h = fract(sin(dot(i, vec2(12.9898,78.233))) * 43758.5453);
+        return step(0.9, h) * smoothstep(0.3, 0.0, length(f - 0.5)); }
+      void main(){
+        vec2 q = floor(vUv * 48.0) / 48.0;
+        vec3 c = vec3(0.015, 0.03, 0.045);
+        c += star(q * 9.0 + vec2(uTime * 0.05, 0.0)) * vec3(0.35, 0.8, 0.7);
+        c += star(q * 15.0 + vec2(0.0, uTime * 0.08) + 3.1) * vec3(0.6, 0.95, 0.85) * 0.8;
+        c += star(q * 23.0 - vec2(uTime * 0.11) + 7.7) * vec3(0.2, 0.5, 0.55);
+        gl_FragColor = vec4(c, 1.0);
+      }`,
+  }));
+  pool.rotation.x = -Math.PI / 2;
+  pool.position.set(0.5, 0.75, 0.5);
+  group.add(pool);
+  zones.nether.scene.add(group);
+  return { group, pool, tint(c) { mats.forEach((m) => m.color.copy(c)); } };
+})();
+
+// Blocks the player digs through to go down a level.
+function breakable(scene, top, side, colors) {
+  const tex = blockTex(side), topTex = blockTex(top);
+  const mats = [tex, tex, topTex, tex, tex, tex].map((m) => new THREE.MeshBasicMaterial({ map: m }));
+  const crackMat = new THREE.MeshBasicMaterial({ map: crackTex[0], transparent: true, depthWrite: false });
+  const g = new THREE.Group();
+  const cube = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mats);
+  const crack = new THREE.Mesh(new THREE.BoxGeometry(1.01, 1.01, 1.01), crackMat);
+  cube.position.set(0.5, 0.5, 0.5); crack.position.copy(cube.position);
+  g.add(cube, crack);
+  scene.add(g);
+  const b = {
+    g, x: 0, broken: false,
+    place(x, y, z) { b.x = x; g.position.set(x, y, z); },
+    tint(c) { mats.forEach((m) => m.color.copy(c)); },
+    stage(st) {
+      const gone = st >= 6;
+      if (gone && !b.broken) debris.burst(g.position.clone().add(new THREE.Vector3(0.5, 0.6, 0.5)), colors, 26, 0.8);
+      b.broken = gone;
+      g.visible = !gone;
+      crackMat.map = crackTex[Math.min(st, 5)];
+      crack.visible = st > 0;
+    },
+  };
+  return b;
+}
+const digBlocks = {};
 
 // ---------- particles ----------
 const debris = (() => {
@@ -663,75 +724,111 @@ const sections = $$(".scene").map((el) => ({ el, name: el.dataset.scene, beats: 
 const S = Object.fromEntries(sections.map((s) => [s.name, s]));
 const wide = () => innerWidth >= 760;
 
+// Walking speed: each chapter covers about 30 blocks, so the player strolls rather than sprints.
+// Every world change is something the player does (digs down, drops, steps through a portal),
+// and chapters in the same world hand the camera over without a cut.
 const CH = {
   surface: {
-    zone: "summit", tool: null,
-    cam: [{ p: 0, dist: 16, yaw: 165, pitch: 20, shift: 0.3 }, { p: 0.16, dist: 10, yaw: 198, pitch: 12, shift: 0.28 }, { p: 1, dist: 9, yaw: 214, pitch: 14, shift: 0.26 }],
+    zone: "summit", tool: "pick",
+    cam: [{ p: 0, dist: 16, yaw: 165, pitch: 20, shift: 0.3 }, { p: 0.16, dist: 10, yaw: 198, pitch: 12, shift: 0.28 }, { p: 0.8, dist: 9, yaw: 214, pitch: 14, shift: 0.26 }, { p: 1, dist: 7, yaw: 222, pitch: 44, shift: 0 }],
     play(s) {
       skyUniforms.uDay.value = clamp(s.p * 1.25);
       zones.summit.scene.fog.color.copy(summitHorizon(skyUniforms.uDay.value));
-      return { x: 30 + ease(clamp((s.p - 0.12) / 0.88)) * 110, pose: "walk" };
+      const x = 30 + ease(clamp((s.p - 0.12) / 0.7)) * 28.5;
+      return dig(s.p, x, digBlocks.summit, "walk");
     },
   },
   mineshaft: {
     zone: "mineshaft", tool: "pick",
-    cam: [{ p: 0, dist: 5.2, yaw: -112, pitch: 9, shift: 0.24 }, { p: 1, dist: 5.4, yaw: -118, pitch: 10, shift: 0.24 }],
+    cam: [{ p: 0, dist: 6, yaw: -112, pitch: 30, shift: 0.1 }, { p: 0.06, dist: 5.2, yaw: -112, pitch: 9, shift: 0.24 }, { p: 0.82, dist: 5.4, yaw: -118, pitch: 10, shift: 0.24 }, { p: 1, dist: 4.4, yaw: -125, pitch: 42, shift: 0 }],
     play(s) {
-      const X = (i) => 40 + i * 20, { idx, q } = s;
+      const X = (i) => 40 + i * 9, { idx, q } = s;
       ores.forEach((o, i) => setOre(o, i < idx ? 6 : i > idx || idx < 0 ? 0 : Math.floor(clamp(q / 0.6) * 6)));
-      if (idx < 0) return { x: X(0) - 1.35, pose: "idle" };
-      const to = idx < ores.length - 1 ? X(idx + 1) - 1.35 : X(idx) + 14;
-      const m = ease(clamp((q - 0.62) / 0.38));
-      return { x: lerp(X(idx) - 1.35, to, m), pose: q < 0.62 ? "mine" : "walk" };
+      let st;
+      if (idx < 0) st = { x: X(0) - 1.35, pose: "idle" };
+      else {
+        const to = idx < ores.length - 1 ? X(idx + 1) - 1.35 : 76.5;
+        st = { x: lerp(X(idx) - 1.35, to, ease(clamp((q - 0.62) / (idx < ores.length - 1 ? 0.38 : 0.2)))), pose: q < 0.62 ? "mine" : "walk" };
+      }
+      return dig(s.p, st.x, digBlocks.mineshaft, st.pose, drop(s.p));
     },
   },
   caves: {
     zone: "caves", tool: "sword",
-    cam: [{ p: 0, dist: 8.5, yaw: 206, pitch: 12, shift: 0.22 }, { p: 1, dist: 8.5, yaw: 212, pitch: 12, shift: 0.22 }],
+    cam: [{ p: 0, dist: 8, yaw: 206, pitch: 26, shift: 0.1 }, { p: 0.07, dist: 8.5, yaw: 206, pitch: 12, shift: 0.22 }, { p: 1, dist: 8.5, yaw: 212, pitch: 12, shift: 0.22 }],
     play(s, t) {
-      const X = (i) => 30 + i * 14, { idx, q } = s;
+      const X = (i) => 30 + i * 8, { idx, q } = s;
       mobs.forEach((m, i) => updateMob(m, i, idx, q, X, t));
-      if (idx < 0) return { x: X(0) - 6, pose: "idle" };
+      const d = drop(s.p);
+      if (idx < 0) return { x: X(0) - 6, pose: d.pose || "idle", dy: d.dy };
       const x = idx === 0 && q < 0.2 ? lerp(X(0) - 6, X(0), ease(q / 0.2)) : X(idx);
-      const walk = ease(clamp((q - 0.8) / 0.2));
-      const nx = idx < mobs.length - 1 ? X(idx + 1) : X(idx) + 14;
-      return { x: lerp(x, nx, walk), pose: q < 0.42 ? "idle" : q < 0.68 ? "fight" : q > 0.8 ? "walk" : "idle", walkIn: idx === 0 && q < 0.2 };
+      const nx = idx < mobs.length - 1 ? X(idx + 1) : 62;
+      return { x: lerp(x, nx, ease(clamp((q - 0.8) / 0.2))), pose: q < 0.42 ? "idle" : q < 0.68 ? "fight" : q > 0.8 ? "walk" : "idle" };
     },
   },
   portal: {
     zone: "caves", tool: null,
     cam: [{ p: 0, dist: 8.5, yaw: 212, pitch: 12, shift: 0.22 }, { p: 0.32, dist: 9, yaw: 236, pitch: 9, shift: 0.18 }, { p: 0.66, dist: 6, yaw: 254, pitch: 6, shift: 0.08 }, { p: 0.92, dist: 2.2, yaw: 268, pitch: 3, shift: 0 }],
     play(s, t) {
-      const p = s.p, built = Math.floor(clamp((p - 0.3) / 0.24) * portalBlocks.length);
-      portalBlocks.forEach((b, i) => { const on = i < built; if (on && !b.visible) debris.burst(b.getWorldPosition(new THREE.Vector3()), ["#3b2466", "#1b1030"], 6); b.visible = on; });
-      portal.userData.swirl.material.uniforms.uLit.value = ease(clamp((p - 0.55) / 0.1));
-      portal.userData.swirl.material.uniforms.uTime.value = t;
-      const x = p < 0.3 ? lerp(86, 104, ease(p / 0.3)) : lerp(104, 111.6, ease(clamp((p - 0.68) / 0.2)));
+      const p = s.p, built = Math.floor(clamp((p - 0.3) / 0.24) * cavePortal.blocks.length);
+      cavePortal.blocks.forEach((b, i) => { const on = i < built; if (on && !b.visible) debris.burst(b.getWorldPosition(new THREE.Vector3()), ["#3b2466", "#1b1030"], 6); b.visible = on; });
+      cavePortal.lit(ease(clamp((p - 0.55) / 0.1)), t);
+      const x = p < 0.3 ? lerp(62, 70, ease(p / 0.3)) : lerp(70, 77.6, ease(clamp((p - 0.68) / 0.2)));
       return { x, pose: p < 0.3 || p > 0.68 ? "walk" : p < 0.55 ? "mine" : "idle" };
     },
   },
   nether: {
     zone: "nether", tool: null,
-    cam: [{ p: 0, dist: 12, yaw: 200, pitch: 14, shift: 0.26 }, { p: 0.5, dist: 9, yaw: 222, pitch: 10, shift: 0.26 }, { p: 1, dist: 11, yaw: 196, pitch: 16, shift: 0.26 }],
-    play(s) { return { x: 20 + clamp(s.p / 0.95) * 140, pose: "walk" }; },
+    cam: [{ p: 0, dist: 7, yaw: 115, pitch: 10, shift: 0.05 }, { p: 0.12, dist: 11, yaw: 205, pitch: 13, shift: 0.26 }, { p: 0.55, dist: 9, yaw: 222, pitch: 10, shift: 0.26 }, { p: 1, dist: 12, yaw: 200, pitch: 16, shift: 0.26 }],
+    play(s, t) {
+      netherPortal.lit(1, t);
+      const out = ease(clamp(s.p / 0.1));
+      return { x: s.p < 0.1 ? lerp(17.2, 20, out) : 20 + ease(clamp((s.p - 0.1) / 0.88)) * 30, pose: "walk" };
+    },
   },
   fortress: {
-    zone: "fortress", tool: null,
-    cam: [{ p: 0, dist: 13, yaw: 196, pitch: 18, shift: 0.26 }, { p: 0.6, dist: 10, yaw: 216, pitch: 12, shift: 0.24 }, { p: 0.92, dist: 7, yaw: 252, pitch: 7, shift: 0.05 }],
+    zone: "nether", tool: null,
+    cam: [{ p: 0, dist: 12, yaw: 200, pitch: 16, shift: 0.26 }, { p: 0.55, dist: 10, yaw: 216, pitch: 12, shift: 0.24 }, { p: 0.78, dist: 8, yaw: 226, pitch: 20, shift: 0.05 }, { p: 1, dist: 6.5, yaw: 234, pitch: 46, shift: 0 }],
     play(s, t) {
-      gateway.material.uniforms.uLit.value = clamp((s.p - 0.55) / 0.25);
-      gateway.material.uniforms.uTime.value = t;
-      return { x: 20 + ease(clamp(s.p / 0.88)) * 140, pose: "walk" };
+      endPortal.pool.material.uniforms.uTime.value = t;
+      if (s.p < 0.8) return { x: 50 + ease(s.p / 0.8) * 38, pose: "walk" };
+      // Hop onto the frame and into the pool.
+      const k = clamp((s.p - 0.8) / 0.1);
+      const sink = ease(clamp((s.p - 0.9) / 0.1));
+      return { x: lerp(88, 91.5, ease(k)), pose: sink > 0 ? "fall" : "walk", dy: Math.sin(k * Math.PI) * 1.2 - sink * 3.5 };
     },
   },
   end: {
     zone: "end", tool: null,
-    cam: [{ p: 0, dist: 10, yaw: 204, pitch: 10, shift: 0.26 }, { p: 0.6, dist: 12, yaw: 214, pitch: 13, shift: 0.26 }, { p: 1, dist: 15, yaw: 186, pitch: 8, shift: 0.1, lift: 4.5 }],
-    play(s) { return { x: 30 + clamp(s.p / 0.9) * 110, pose: s.p > 0.9 ? "idle" : "walk" }; },
+    cam: [{ p: 0, dist: 8, yaw: 215, pitch: 30, shift: 0.05 }, { p: 0.08, dist: 10, yaw: 206, pitch: 12, shift: 0.26 }, { p: 0.6, dist: 12, yaw: 214, pitch: 13, shift: 0.26 }, { p: 1, dist: 15, yaw: 228, pitch: 7, shift: 0.05, lift: 6 }],
+    play(s) {
+      const d = drop(s.p);
+      return { x: 28.5 + ease(clamp((s.p - 0.06) / 0.8)) * 33, pose: d.pose || (s.p > 0.86 ? "idle" : "walk"), dy: d.dy };
+    },
   },
 };
-// Fades between worlds: the colour of the wash before each chapter.
-const WASH_IN = { mineshaft: "#140d08", caves: "#05050a", nether: "portal", fortress: "#2a0806", end: "void" };
+// The wash between worlds, with a line of story while it covers the screen.
+const WASH_IN = {
+  mineshaft: { bg: "#140d08", text: "Dig straight down…" },
+  caves: { bg: "#05050a", text: "…and deeper still." },
+  nether: { cls: "portal", text: "Through the portal." },
+  end: { cls: "void", text: "In the End." },
+};
+
+// Mine the block underfoot, then drop into the hole (the last 15% of a chapter).
+function dig(p, x, block, pose, before = {}) {
+  if (!block) return { x, pose, ...before };
+  const k = clamp((p - 0.85) / 0.08);
+  block.stage(p < 0.85 ? 0 : Math.floor(k * 6));
+  if (p < 0.85) return { x, pose: before.pose || pose, dy: before.dy || 0 };
+  const fall = ease(clamp((p - 0.93) / 0.07));
+  return { x: block.x + 0.5, pose: fall > 0 ? "fall" : "dig", dy: -fall * 5 };
+}
+// Land from above at the start of a chapter.
+function drop(p) {
+  if (p >= 0.06) return {};
+  return { dy: (1 - ease(p / 0.06)) * 6, pose: "fall" };
+}
 
 function camAt(keys, p) {
   let a = keys[0], b = keys[keys.length - 1];
@@ -770,7 +867,7 @@ function updateMob(m, i, idx, q, X, t) {
   root.rotation.z = 0;
   root.visible = i === idx;
   const a = ease(clamp(q / 0.42));
-  const x = lerp(X(i) + 14, X(i) + (i === 2 ? 2.1 : 1.6), a);
+  const x = lerp(X(i) + 10, X(i) + (i === 2 ? 2.1 : 1.6), a);
   root.position.set(x, gy, PZ);
   root.rotation.y = -Math.PI / 2;
   const hurt = i === idx && q > 0.48 && Math.floor(t * 11) % 2 === 0;
@@ -780,9 +877,47 @@ function updateMob(m, i, idx, q, X, t) {
   else root.position.y = gy + (q < 0.42 ? Math.abs(Math.sin(t * 6)) * 0.5 : 0);
 }
 
+// ---------- smooth scrolling ----------
+// Wheel and trackpad input glide towards a target instead of jumping, and in-page links glide
+// too. Touch, keyboard and the scrollbar stay native; reduced-motion users get plain scrolling.
+const smooth = (() => {
+  let target = scrollY, cur = scrollY, gliding = false, ours = false;
+  const max = () => document.documentElement.scrollHeight - innerHeight;
+  const go = (y) => { target = clamp(y, 0, max()); if (!gliding) cur = scrollY; gliding = true; };
+  if (!REDUCE) {
+    addEventListener("wheel", (e) => {
+      if (e.ctrlKey || e.defaultPrevented || e.target.closest("dialog, .term")) return;
+      e.preventDefault();
+      const d = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaMode === 2 ? e.deltaY * innerHeight : e.deltaY;
+      go((gliding ? target : scrollY) + d);
+    }, { passive: false });
+    document.addEventListener("click", (e) => {
+      const a = e.target.closest('a[href^="#"]');
+      const el = a && document.getElementById(a.getAttribute("href").slice(1));
+      if (!el && a?.getAttribute("href") !== "#top") return;
+      e.preventDefault();
+      // Land on a chapter with its first card in view, past the fade between worlds.
+      go(el ? el.getBoundingClientRect().top + scrollY + (el.classList.contains("scene") ? innerHeight * 0.5 : 0) : 0);
+      history.replaceState(null, "", a.getAttribute("href"));
+    });
+  }
+  // Anything else that scrolls the page (keys, scrollbar, touch) takes over from a glide.
+  addEventListener("scroll", () => { if (!ours) { gliding = false; target = cur = scrollY; } ours = false; }, { passive: true });
+  return {
+    tick(dt) {
+      if (!gliding) return;
+      cur += (target - cur) * (1 - Math.exp(-dt * 8));
+      if (Math.abs(target - cur) < 0.4) { cur = target; gliding = false; }
+      ours = true;
+      scrollTo(0, cur);
+    },
+  };
+})();
+const progressBar = $("#progress");
+
 // ---------- frame loop ----------
 let activeZone = null, current = sections[0], jumping = false, lastY = -1;
-let heroX = 30, heroPrevX = 30, walked = 0;
+let heroX = 30, heroPrevX = 30, walked = 0, landed = true;
 const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), tmp = new THREE.Vector3();
 let snap = true;
 
@@ -802,13 +937,26 @@ function switchZone(z) {
 function onZoneReady(z) {
   if (z.name === "mineshaft") {
     const PZ = z.data.PZ, y = z.data.ground[0];
-    ores.forEach((o, i) => o.g.position.set(40 + i * 20 + 0.5, y, PZ + 0.5));
+    ores.forEach((o, i) => o.g.position.set(40 + i * 9 + 0.5, y, PZ + 0.5));
     const railMat = new THREE.MeshBasicMaterial({ color: 0x8c8c96 }), tie = new THREE.MeshBasicMaterial({ map: blockTex("planks") });
     for (const dz of [-0.28, 0.28]) { const r = new THREE.Mesh(new THREE.BoxGeometry(z.data.size[0], 0.06, 0.07), railMat); r.position.set(z.data.size[0] / 2, y + 0.07, PZ + 0.5 + dz); rails.add(r); }
     for (let x = 0; x < z.data.size[0]; x += 0.5) { const t = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.04, 0.9), tie); t.position.set(x, y + 0.02, PZ + 0.5); rails.add(t); }
   }
-  if (z.name === "caves") portal.position.set(110, z.data.ground[0], z.data.PZ - 1.5);
-  if (z.name === "fortress") gateway.position.set(171, z.data.ground[0] + 7, z.data.PZ + 0.5);
+  if (z.name === "summit") {
+    digBlocks.summit = breakable(z.scene, "grass_top", "grass_side", ["#5fae3d", "#7a5236", "#86603f"]);
+    digBlocks.summit.place(58, z.data.ground[58] - 1, z.data.PZ);
+  }
+  if (z.name === "mineshaft") {
+    digBlocks.mineshaft = breakable(z.scene, "planks", "planks", ["#a7794a", "#6e4a2b"]);
+    digBlocks.mineshaft.place(76, z.data.ground[76] - 1, z.data.PZ);
+    digBlocks.mineshaft.tint(z.actor);
+  }
+  if (z.name === "caves") cavePortal.group.position.set(76, z.data.ground[0], z.data.PZ - 1.5);
+  if (z.name === "nether") {
+    netherPortal.group.position.set(16.5, z.data.ground[0], z.data.PZ - 1.5);
+    endPortal.group.position.set(91, z.data.ground[0], z.data.PZ);
+    endPortal.tint(z.actor);
+  }
   if (z === activeZone) ambient.set(z.name, hero.root.position);
 }
 
@@ -820,7 +968,7 @@ function readBeats(s) {
   s.beats.forEach((b, i) => b.classList.toggle("on", s === current && i === idx));
 }
 
-const wash = $("#wash"), depthY = $("#depthY"), depthList = $("#depthList"), depthEl = $(".depth"), finale = $("#download");
+const wash = $("#wash"), washText = $("#washText"), depthY = $("#depthY"), depthList = $("#depthList"), depthEl = $(".depth"), finale = $("#download");
 depthList.innerHTML = sections.map((s) => `<li data-for="${s.name}">${s.el.dataset.label}</li>`).join("");
 const depthItems = $$("li", depthList), navLinks = $$(".bar nav a");
 const NAV = { surface: "surface", mineshaft: "mineshaft", caves: "mineshaft", portal: "mineshaft", nether: "nether", fortress: "fortress", end: "end" };
@@ -829,7 +977,9 @@ let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000), t = now / 1000;
   last = now;
+  smooth.tick(dt);
   const H = innerHeight, y = scrollY;
+  progressBar.style.transform = `scaleX(${(y / Math.max(1, document.documentElement.scrollHeight - H)).toFixed(4)})`;
   jumping = Math.abs(y - lastY) > H * 0.6;
   lastY = y;
 
@@ -846,19 +996,20 @@ function frame(now) {
   const ch = CH[current.name], zone = zones[ch.zone];
   switchZone(zone);
 
-  // Fades between worlds.
-  let w = 0, washCls = "";
+  // Fades between worlds, with a line of story while the screen is covered.
+  let w = 0, wi = null;
   const i = sections.indexOf(current), nextS = sections[i + 1];
-  if (!active) w = 1;
+  if (!active) { w = 1; wi = nextS && WASH_IN[nextS.name]; }
   else {
-    if (WASH_IN[current.name]) { w = Math.max(w, 1 - clamp(current.p / 0.07)); washCls = WASH_IN[current.name]; }
-    if (nextS && WASH_IN[nextS.name] && current.p > 0.86) { w = Math.max(w, clamp((current.p - 0.86) / 0.14)); washCls = WASH_IN[nextS.name]; }
+    if (WASH_IN[current.name]) { w = Math.max(w, 1 - clamp(current.p / 0.07)); wi = WASH_IN[current.name]; }
+    if (nextS && WASH_IN[nextS.name] && current.p > 0.86) { w = Math.max(w, clamp((current.p - 0.9) / 0.1)); wi = WASH_IN[nextS.name]; }
   }
-  if (!active && nextS) washCls = WASH_IN[nextS.name] || washCls;
-  const cls = washCls === "portal" || washCls === "void" ? washCls : "";
-  wash.className = cls;
-  wash.style.background = cls ? "" : washCls || "#000";
+  wi = wi || { bg: "#000", text: "" };
+  wash.className = wi.cls || "";
+  wash.style.background = wi.cls ? "" : wi.bg;
   wash.style.opacity = w.toFixed(3);
+  washText.textContent = wi.text;
+  washText.style.opacity = clamp((w - 0.6) / 0.4).toFixed(3);
 
   // Load the worlds nearest to here first.
   const order = [i, i + 1, i - 1, i + 2, i + 3, i - 2].filter((k) => sections[k]).map((k) => CH[sections[k].name].zone);
@@ -873,7 +1024,9 @@ function frame(now) {
     if (pose === "walk" && !moving) pose = "idle";
     if (!active) pose = "fall";
     const gy = groundAt(zone, heroX), PZ = zone.data.PZ + 0.5;
-    hero.root.position.set(heroX, gy, PZ);
+    hero.root.position.set(heroX, gy + (st.dy || 0), PZ);
+    if (current.name === "caves" && st.dy === undefined && !landed) { landed = true; debris.burst(hero.root.position.clone(), ["#4a4f66", "#2d3040"], 14, 0.9); }
+    if (st.dy > 0) landed = false;
     hero.root.rotation.y = Math.PI / 2;
     hero.tool(ch.tool);
     hero.setTint(zone.actor);
@@ -1005,6 +1158,13 @@ const OS_ASSET = { windows: /windows-x64\.zip$/, mac: /macos-universal\.dmg$/, l
 // ---------- screenshots ----------
 {
   const dlg = $("#lightbox"), img = $("img", dlg);
-  $$(".shot").forEach((b) => b.addEventListener("click", () => { img.src = b.dataset.src; img.alt = $("img", b).alt; dlg.showModal(); }));
+  $$(".shot").forEach((b) => {
+    b.addEventListener("click", () => { img.src = b.dataset.src; img.alt = $("img", b).alt; dlg.showModal(); });
+    // A screenshot that can't load is left out rather than shown broken.
+    const im = $("img", b);
+    const hide = () => { b.hidden = true; };
+    im.addEventListener("error", hide);
+    if (im.complete && im.naturalWidth === 0 && im.src) im.decode().catch(hide);
+  });
   dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
 }

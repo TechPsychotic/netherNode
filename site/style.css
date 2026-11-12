@@ -25,7 +25,7 @@
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; background: var(--obsidian); }
+html { background: var(--obsidian); } /* main.js glides the page itself */
 body {
   margin: 0;
   background: var(--obsidian);
@@ -159,6 +159,8 @@ main { position: relative; z-index: 2; }
 #wash { position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: 0; background: #000; }
 #wash.portal { background: radial-gradient(circle at 50% 55%, #e6a8ff, #9b3cff 35%, #4b0f9e 75%, #22064a); }
 #wash.void { background: radial-gradient(circle at 50% 50%, #3b1a5c, #12081d 60%, #030106); }
+#progress { position: fixed; left: 0; right: 0; top: 0; height: 3px; z-index: 55; transform-origin: 0 50%; transform: scaleX(0); background: linear-gradient(90deg, var(--violet), var(--magenta)); box-shadow: 0 0 10px rgba(155, 92, 255, 0.7); pointer-events: none; }
+#washText { position: fixed; left: 0; right: 0; top: 46%; z-index: 1; margin: 0; text-align: center; pointer-events: none; opacity: 0; font: clamp(24px, 4vw, 44px) var(--pixel); color: #fff; text-shadow: 4px 4px 0 rgba(0, 0, 0, 0.5); }
 #loading { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 3; margin: 0; font: 14px var(--pixel); color: var(--muted); background: rgba(12, 8, 20, 0.7); padding: 6px 12px; }
 #loading::after { content: ""; display: inline-block; width: 8px; height: 8px; margin-left: 8px; background: var(--violet-bright); animation: blink 0.8s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }

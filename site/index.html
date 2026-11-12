@@ -44,14 +44,16 @@
 
 <!-- The 3D world sits behind the page; the feature cards scroll over it. -->
 <canvas id="world" aria-hidden="true"></canvas>
+<div id="progress" aria-hidden="true"></div>
 <div id="wash" aria-hidden="true"></div>
+<p id="washText" aria-hidden="true"></p>
 <p id="loading" aria-hidden="true">Generating world…</p>
 <div class="dropzone" aria-hidden="true"><p>Drop your skin to wear it</p></div>
 
 <main id="top">
 
 <!-- ============ 1. SURFACE ============ -->
-<section class="scene" id="surface" data-scene="surface" data-y="180" data-label="Play">
+<section class="scene" id="surface" data-scene="surface" data-extra="1" data-y="180" data-label="Play">
   <div class="beats">
     <div class="beat intro">
       <div class="intro-card">
@@ -96,7 +98,7 @@
 
 
 <!-- ============ 2. MINESHAFT ============ -->
-<section class="scene dark" id="mineshaft" data-scene="mineshaft" data-y="12" data-label="Mods">
+<section class="scene dark" id="mineshaft" data-scene="mineshaft" data-extra="1" data-y="12" data-label="Mods">
   <div class="beats">
     <article class="beat"><div class="card">
       <p class="kicker">Y 12 · Abandoned mineshaft</p>
@@ -127,7 +129,7 @@
 
 
 <!-- ============ 3. CAVES ============ -->
-<section class="scene dark" id="caves" data-scene="caves" data-y="-52" data-label="Fixes">
+<section class="scene dark" id="caves" data-scene="caves" data-extra="0.5" data-y="-52" data-label="Fixes">
   <div class="beats">
     <article class="beat"><div class="card">
       <p class="kicker">Y −52 · Deep caves · Monster 1 of 4</p>
@@ -223,7 +225,7 @@
       <p class="kicker">Nether fortress · Servers</p>
       <h2>Right there in Multiplayer</h2>
       <p>Your servers show up in Minecraft's Multiplayer list as "<i>name</i> (this PC)". If a mod only works in the game, netherNode moves it out of the server and tells you.</p>
-      <p class="aside">The gateway hums. One more step.</p>
+      <p class="aside">At the end of the bridge, an End portal waits.</p>
     </div></article>
   </div>
 </section>

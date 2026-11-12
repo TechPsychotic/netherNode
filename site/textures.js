@@ -188,6 +188,21 @@
       const v = cells(r, 6);
       each((x, y) => { const c = v(x, y); const lean = (x - c.cx) + (y - c.cy); px(x, y, c.d2 - c.d1 < 0.9 ? [92, 54, 160] : lean < 0 ? [214, 180, 255] : [150, 98, 226]); });
     },
+    // End portal frame: pale stone with a teal trim, and an eye set into the top.
+    end_frame_side({ px, r, n4 }) {
+      each((x, y) => px(x, y, y < 4 ? tone([58, 104, 92], 0.85 + 0.25 * n4(x, y)) : y === 4 ? [40, 74, 64] : tone([206, 212, 168], 0.9 + 0.1 * n4(x, y) + (r() - 0.5) * 0.05)));
+    },
+    end_frame_top({ px, r, n4 }) {
+      each((x, y) => {
+        const ring = x === 0 || y === 0 || x === 15 || y === 15 || x === 1 || y === 1 || x === 14 || y === 14;
+        px(x, y, ring ? tone([58, 104, 92], 0.85 + 0.2 * n4(x, y)) : tone([206, 212, 168], 0.9 + 0.1 * n4(x, y) + (r() - 0.5) * 0.05));
+      });
+      for (let y = 5; y <= 10; y++) for (let x = 5; x <= 10; x++) {
+        const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
+        px(x, y, d > 2 ? [34, 84, 68] : d > 1 ? [96, 186, 150] : [12, 22, 20]);
+      }
+      px(6, 6, [200, 255, 230]);
+    },
     torch({ px }) {
       each((x, y) => px(x, y, y < 4 ? (y < 2 ? [255, 248, 200] : [255, 186, 70]) : [124, 92, 52]));
     },
